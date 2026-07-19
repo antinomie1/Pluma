@@ -16,3 +16,8 @@ build/
 cmake-build-debug/
 .vscode/
 .idea/
+*.exe
+*.o
+*.obj
+*.a
+!lib/libglfw3.a

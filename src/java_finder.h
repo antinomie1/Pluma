@@ -9,7 +9,7 @@
 
 #pragma once
 
-namespace UI {
-    void SetStyle();
-    void RenderUI();
-}
+#include <string>
+
+/** Resolve java.exe. Prefer explicit path, then JAVA_HOME, PATH, common install dirs. */
+std::string find_java(const std::string& preferred = {});
