@@ -1,0 +1,3 @@
+[submodule "imgui_md2"]
+	path = imgui_md2
+	url = https://github.com/antinomie1/imgui-md2.git

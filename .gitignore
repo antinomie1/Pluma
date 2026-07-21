@@ -14,10 +14,10 @@ CMakePresets.json
 out/
 build/
 cmake-build-debug/
+.xmake/
 .vscode/
 .idea/
 *.exe
 *.o
 *.obj
 *.a
-!lib/libglfw3.a
