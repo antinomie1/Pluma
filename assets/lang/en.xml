@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  English (fallback) language pack for Pluma's i18n system.
+
+  This file is source, not build output: it is parsed at *build time* by
+  scripts/generate_embedded_languages.ps1, which emits src/ui/i18n_generated.cpp
+  (a C++ byte table compiled into the binary). Nothing here is read at runtime.
+
+  "en" is the mandatory fallback language: ui::i18n::Tr() falls back to this
+  language's value when the active language is missing a key. Keep this file's
+  key set the superset of every other language pack.
+-->
+<language code="en" name="English">
+  <string key="action.primary">PRIMARY ACTION</string>
+  <string key="app.title">Pluma</string>
+  <string key="content.body">Event, render and logic threads are running independently.</string>
+  <string key="content.heading">Framework skeleton</string>
+  <string key="demo.switch">Demo switch</string>
+  <string key="download.games">Games</string>
+  <string key="download.mods">Mods</string>
+  <string key="nav.download">Download</string>
+  <string key="nav.home">Home</string>
+  <string key="nav.profiles">Profiles</string>
+  <string key="nav.settings">Settings</string>
+  <string key="nav.tasks">Tasks</string>
+  <string key="page.wip">This page is under construction.</string>
+  <string key="settings.about">About</string>
+  <string key="settings.accent">Accent</string>
+  <string key="settings.appearance">Interface</string>
+  <string key="settings.dark_mode">Dark mode</string>
+  <string key="settings.game">Game</string>
+  <string key="settings.java">Java</string>
+  <string key="settings.language">Language</string>
+  <string key="settings.project_url">Project URL</string>
+  <string key="settings.theme">Theme</string>
+  <string key="status.ticks">logic ticks: %llu  (uptime %.1fs)</string>
+</language>

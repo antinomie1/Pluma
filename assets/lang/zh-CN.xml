@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Simplified Chinese language pack for Pluma's i18n system.
+
+  Build-time source only: see assets/lang/en.xml for how this is consumed by
+  scripts/generate_embedded_languages.ps1. Keep status.ticks' %llu / %.1f
+  format specifiers, their order, and the double space between them intact:
+  they are consumed by a C printf-style call (std::snprintf), which is purely
+  positional (non-numbered) in this codebase.
+-->
+<language code="zh-CN" name="简体中文">
+  <string key="action.primary">主要操作</string>
+  <string key="app.title">Pluma</string>
+  <string key="content.body">事件、渲染与逻辑线程正在独立运行。</string>
+  <string key="content.heading">框架骨架</string>
+  <string key="demo.switch">演示开关</string>
+  <string key="download.games">游戏</string>
+  <string key="download.mods">模组</string>
+  <string key="nav.download">下载</string>
+  <string key="nav.home">主页</string>
+  <string key="nav.profiles">档案管理</string>
+  <string key="nav.settings">设置</string>
+  <string key="nav.tasks">任务</string>
+  <string key="page.wip">此页面正在建设中。</string>
+  <string key="settings.about">关于</string>
+  <string key="settings.accent">主色</string>
+  <string key="settings.appearance">界面与主题</string>
+  <string key="settings.dark_mode">深色模式</string>
+  <string key="settings.game">游戏</string>
+  <string key="settings.java">Java</string>
+  <string key="settings.language">语言</string>
+  <string key="settings.project_url">项目地址</string>
+  <string key="settings.theme">主题</string>
+  <string key="status.ticks">逻辑计数：%llu  (运行时间 %.1f 秒)</string>
+</language>

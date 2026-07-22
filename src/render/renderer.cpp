@@ -1,14 +1,17 @@
 #include "render/renderer.h"
 
+#include "config/config.h"
 #include "core/event_queue.h"
 #include "core/types.h"
 #include "logic/engine.h"
 #include "platform/window.h"
 #include "ui/frame.h"
+#include "ui/i18n.h"
 #include "ui/theme.h"
 
 #include <imgui.h>
 #include <backends/imgui_impl_opengl3.h>
+#include <imgui_md2/assets.h>
 #include <imgui_md2/imgui_md2.h>
 
 #ifdef _WIN32
@@ -17,6 +20,7 @@
 #include <GL/gl.h>
 
 #include <chrono>
+#include <cstdint>
 #include <string>
 #include <thread>
 #include <vector>
@@ -147,14 +151,57 @@ void Renderer::run() {
     io.BackendPlatformName = "pluma";
 
     ImGuiMD2::CreateContext();
-    ImGuiMD2::Theme theme = ui::MakeDefaultTheme();
+
+    // Load persisted settings before anything else derives from them: an
+    // absent/corrupt config.json just leaves the store empty, so every
+    // GetXxx() below falls back to its `def` and the app starts on defaults
+    // (see config::Config::Load()).
+    config::Config::Instance().Load("config.json");
+    const std::string configured_lang = config::Config::Instance().GetString("language", "");
+    ui::i18n::Initialize(configured_lang.empty() ? nullptr : configured_lang.c_str());
+
+    const bool configured_dark = config::Config::Instance().GetBool("theme.dark", false);
+    const int configured_accent = static_cast<int>(
+        config::Config::Instance().GetInt("theme.accent", static_cast<int64_t>(ImGuiMD2::Swatch::Blue)));
+    ImGuiMD2::Theme theme =
+        ui::MakeTheme(configured_dark, static_cast<ImGuiMD2::Swatch>(configured_accent));
     std::string font_error;
     // Scale the whole MD2 type scale up so text reads larger and heavier (the
     // embedded Medium weight is the boldest available).
     ImGuiMD2::FontLoadOptions font_options;
     font_options.scale = 1.3f;
+
+    // Extend glyph coverage with a runtime-discovered system font (e.g. CJK)
+    // on top of the bundled Roboto. Absence is not an error: the app just
+    // keeps whatever coverage Roboto already provides.
+    cjk_font_ = platform::LoadCjkSystemFont();
+    if (cjk_font_.valid()) {
+        ImGuiMD2::FontMerge cjk;
+        cjk.data = cjk_font_.data();
+        cjk.data_size = static_cast<int>(cjk_font_.size());
+        cjk.glyph_ranges = nullptr; // 1.92 rasterizes lazily; no range to pre-declare
+        font_options.merge_fonts.push_back(cjk);
+    }
+
     ImGuiMD2::LoadBundledFonts(*io.Fonts, theme.fonts, "", font_options, &font_error);
     ImGuiMD2::SetTheme(theme);
+
+    // Real-bold nav font: embedded Roboto-Bold merged with a runtime-discovered
+    // bold CJK system face (if any), at the Button text style's pixel size.
+    // Absence of a bold CJK face is not an error -- the app_state_.nav_bold_font
+    // fallback chain (see AddBoldFont) and, failing that, faux-bold in
+    // frame.cpp's NavButton, both degrade gracefully.
+    cjk_bold_font_ = platform::LoadCjkSystemFontBold();
+    std::vector<ImGuiMD2::FontMerge> bold_merges;
+    if (cjk_bold_font_.valid()) {
+        ImGuiMD2::FontMerge cjk_bold;
+        cjk_bold.data = cjk_bold_font_.data();
+        cjk_bold.data_size = static_cast<int>(cjk_bold_font_.size());
+        cjk_bold.glyph_ranges = nullptr;
+        bold_merges.push_back(cjk_bold);
+    }
+    const float btn_px = ImGuiMD2::Typography(ImGuiMD2::TextStyle::Button).size * font_options.scale;
+    app_state_.nav_bold_font = ImGuiMD2::AddBoldFont(*io.Fonts, btn_px, nullptr, bold_merges);
 
     ImGui_ImplOpenGL3_Init("#version 150");
 
@@ -178,7 +225,8 @@ void Renderer::run() {
         window_.events().drain(events);
         feed_input(io, events);
 
-        io.DisplaySize = ImVec2(static_cast<float>(metrics.width), static_cast<float>(metrics.height));
+        io.DisplaySize = ImVec2(std::floor(static_cast<float>(metrics.width)),
+                                std::floor(static_cast<float>(metrics.height)));
         if (metrics.width > 0 && metrics.height > 0) {
             io.DisplayFramebufferScale =
                 ImVec2(static_cast<float>(metrics.fb_width) / static_cast<float>(metrics.width),
@@ -193,7 +241,7 @@ void Renderer::run() {
         ImGuiMD2::NewFrame();
 
         const logic::State logic_state = engine_.snapshot();
-        ui::BuildFrame(window_, logic_state);
+        ui::BuildFrame(window_, logic_state, app_state_);
 
         ImGui::Render();
 
