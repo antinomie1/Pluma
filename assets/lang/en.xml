@@ -12,6 +12,7 @@
 -->
 <language code="en" name="English">
   <string key="action.cancel">Cancel</string>
+  <string key="action.close">Close</string>
   <string key="action.confirm">Confirm</string>
   <string key="action.pause">Pause</string>
   <string key="action.resume">Resume</string>
@@ -37,8 +38,13 @@
   <string key="home.launch.no_account">Create an account in Profiles first.</string>
   <string key="home.launch.no_java">Configure Java in Settings first.</string>
   <string key="home.launch.started">Launching %s…</string>
+  <string key="home.no_account">Not signed in</string>
+  <string key="home.running">Running</string>
   <string key="home.start">Start Game</string>
+  <string key="home.tap_to_add">Tap to add an account</string>
   <string key="instance.back">Back</string>
+  <string key="instance.java.empty">No Java installations configured. Add one in Settings &gt; Java.</string>
+  <string key="instance.java.select">Java</string>
   <string key="instance.override">Use Custom Settings</string>
   <string key="instance.override_desc">Override the global settings for this instance only.</string>
   <string key="instance.settings">Instance Settings</string>
@@ -48,12 +54,21 @@
   <string key="nav.settings">Settings</string>
   <string key="nav.tasks">Tasks</string>
   <string key="page.wip">This page is under construction.</string>
+  <string key="profiles.account.microsoft">Microsoft</string>
   <string key="profiles.account.offline">Offline</string>
+  <string key="profiles.accounts.add_microsoft">Add Microsoft Account</string>
   <string key="profiles.accounts.add_offline">Add Offline Account</string>
   <string key="profiles.accounts.empty">No accounts yet.</string>
   <string key="profiles.accounts_header">Accounts (%d)</string>
   <string key="profiles.dialog.name">Username</string>
   <string key="profiles.dialog.title">New Offline Account</string>
+  <string key="profiles.msa.authenticating">Signing in…</string>
+  <string key="profiles.msa.copy_code">Copy Code</string>
+  <string key="profiles.msa.copy_link">Copy Link</string>
+  <string key="profiles.msa.instructions">Open this page in your browser and enter the code:</string>
+  <string key="profiles.msa.logged_in">Signed in as %s</string>
+  <string key="profiles.msa.requesting">Requesting a login code…</string>
+  <string key="profiles.msa.title">Microsoft Login</string>
   <string key="settings.about">About</string>
   <string key="settings.accent">Accent</string>
   <string key="settings.appearance">Interface</string>
@@ -64,14 +79,18 @@
   <string key="settings.download.mirror.auto">Auto (BMCLAPI, official fallback)</string>
   <string key="settings.download.mirror.bmclapi">BMCLAPI only</string>
   <string key="settings.download.mirror.official">Official only</string>
+  <string key="settings.download.proxy">Proxy (e.g. http://127.0.0.1:7897)</string>
   <string key="settings.download.threads">Segments per File</string>
   <string key="settings.game">Game</string>
   <string key="settings.game.add">Add Directory</string>
   <string key="settings.game.browse">Browse…</string>
+  <string key="settings.game.custom_args">Custom Game Arguments</string>
   <string key="settings.game.dirs_header">Game Directories (%d)</string>
   <string key="settings.game.empty">No game directories configured yet.</string>
+  <string key="settings.game.fullscreen">Fullscreen</string>
   <string key="settings.game.isolation">Instance Isolation</string>
   <string key="settings.game.isolation_desc">Keep each instance's mods, saves and resource packs in its own folder.</string>
+  <string key="settings.game.resolution">Window Resolution</string>
   <string key="settings.java">Java</string>
   <string key="settings.java.auto_find">Auto-find Java</string>
   <string key="settings.java.browse">Browse…</string>

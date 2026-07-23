@@ -3,7 +3,8 @@
 #include "config/config.h"
 #include "core/event_queue.h"
 #include "core/types.h"
-#include "logic/engine.h"
+#include "net/http.h"
+#include "platform/game_monitor.h"
 #include "platform/window.h"
 #include "ui/frame.h"
 #include "ui/game_settings.h"
@@ -117,8 +118,8 @@ void feed_input(ImGuiIO& io, const std::vector<core::InputEvent>& events) {
 
 } // namespace
 
-Renderer::Renderer(platform::Window& window, logic::Engine& engine)
-    : window_(window), engine_(engine) {}
+Renderer::Renderer(platform::Window& window, platform::GameMonitor& monitor)
+    : window_(window), monitor_(monitor) {}
 
 Renderer::~Renderer() { stop(); }
 
@@ -165,6 +166,11 @@ void Renderer::run() {
     config::Config::Instance().Load("config.json");
     const std::string configured_lang = config::Config::Instance().GetString("language", "");
     ui::i18n::Initialize(configured_lang.empty() ? nullptr : configured_lang.c_str());
+
+    // Route all networking through the configured proxy (net.proxy, e.g. a local
+    // Clash endpoint) -- curl won't use the OS system proxy on its own, and
+    // direct connections to *.xboxlive.com are frequently blocked/tampered.
+    net::SetProxy(config::Config::Instance().GetString("net.proxy", ""));
 
     // First-launch (or nothing-configured-yet) Java auto-discovery, scanning
     // PATH/JAVA_HOME. Render-thread-exclusive, same as the config/theme/i18n
@@ -297,8 +303,8 @@ std::chrono::steady_clock::time_point Renderer::renderFrame() {
     ImGui::NewFrame();
     ImGuiMD2::NewFrame();
 
-    const logic::State logic_state = engine_.snapshot();
-    ui::BuildFrame(window_, logic_state, app_state_, downloads_);
+    const platform::GameMonitorState game_state = monitor_.snapshot();
+    ui::BuildFrame(window_, game_state, app_state_, downloads_, monitor_);
 
     ImGui::Render();
 

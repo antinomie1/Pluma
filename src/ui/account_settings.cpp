@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -20,7 +21,9 @@ namespace {
 struct Account {
     std::string name;
     std::string uuid;
-    std::string type;
+    std::string type; // "offline" or "msa"
+    std::string token;   // Minecraft access token ("" / unused for offline)
+    std::string refresh; // Microsoft refresh token (msa only)
 };
 
 // Extra gap between the account list and the "add" button, folded into the
@@ -41,6 +44,10 @@ void SaveAccounts(const std::vector<Account>& accounts) {
         cfg.Set(key, accounts[i].uuid);
         std::snprintf(key, sizeof(key), "accounts.%d.type", static_cast<int>(i));
         cfg.Set(key, accounts[i].type);
+        std::snprintf(key, sizeof(key), "accounts.%d.token", static_cast<int>(i));
+        cfg.Set(key, accounts[i].token);
+        std::snprintf(key, sizeof(key), "accounts.%d.refresh", static_cast<int>(i));
+        cfg.Set(key, accounts[i].refresh);
     }
     cfg.Save();
 }
@@ -60,6 +67,10 @@ std::vector<Account> LoadAccounts() {
         a.uuid = cfg.GetString(key, "");
         std::snprintf(key, sizeof(key), "accounts.%d.type", static_cast<int>(i));
         a.type = cfg.GetString(key, "offline");
+        std::snprintf(key, sizeof(key), "accounts.%d.token", static_cast<int>(i));
+        a.token = cfg.GetString(key, "");
+        std::snprintf(key, sizeof(key), "accounts.%d.refresh", static_cast<int>(i));
+        a.refresh = cfg.GetString(key, "");
         accounts.push_back(std::move(a));
     }
     return accounts;
@@ -92,6 +103,38 @@ void CreateOfflineAccount(const std::string& name) {
     }
 }
 
+void CommitMicrosoftAccount(const std::string& name, const std::string& uuid,
+                            const std::string& access_token, const std::string& refresh_token) {
+    if (uuid.empty()) return;
+    std::vector<Account> accounts = LoadAccounts();
+
+    // Refresh tokens in place if this Microsoft account is already present.
+    const auto existing = std::find_if(accounts.begin(), accounts.end(), [&](const Account& a) {
+        return a.type == "msa" && a.uuid == uuid;
+    });
+    int64_t selected_index;
+    if (existing != accounts.end()) {
+        existing->name = name;
+        existing->token = access_token;
+        existing->refresh = refresh_token;
+        selected_index = static_cast<int64_t>(std::distance(accounts.begin(), existing));
+    } else {
+        Account account;
+        account.name = name;
+        account.uuid = uuid;
+        account.type = "msa";
+        account.token = access_token;
+        account.refresh = refresh_token;
+        accounts.push_back(std::move(account));
+        selected_index = static_cast<int64_t>(accounts.size()) - 1;
+    }
+    SaveAccounts(accounts);
+
+    config::Config& cfg = config::Config::Instance();
+    cfg.Set("accounts.selected", selected_index);
+    cfg.Save();
+}
+
 std::string SelectedAccountName() {
     const std::vector<Account> accounts = LoadAccounts();
     const int64_t selected = SelectedIndex(accounts);
@@ -102,6 +145,21 @@ std::string SelectedAccountUuid() {
     const std::vector<Account> accounts = LoadAccounts();
     const int64_t selected = SelectedIndex(accounts);
     return selected < 0 ? std::string() : accounts[static_cast<std::size_t>(selected)].uuid;
+}
+
+std::string SelectedAccountToken() {
+    const std::vector<Account> accounts = LoadAccounts();
+    const int64_t selected = SelectedIndex(accounts);
+    if (selected < 0) return "0";
+    const std::string& token = accounts[static_cast<std::size_t>(selected)].token;
+    return token.empty() ? "0" : token; // offline accounts launch with the "0" placeholder
+}
+
+std::string SelectedAccountType() {
+    const std::vector<Account> accounts = LoadAccounts();
+    const int64_t selected = SelectedIndex(accounts);
+    if (selected < 0) return "legacy";
+    return accounts[static_cast<std::size_t>(selected)].type == "msa" ? "msa" : "legacy";
 }
 
 void BuildAccountSettings(AppState& app_state) {
@@ -146,8 +204,10 @@ void BuildAccountSettings(AppState& app_state) {
                 ImGui::PushID(static_cast<int>(i));
                 bool remove_clicked = false;
                 const bool is_selected = (static_cast<int64_t>(i) == selected);
-                if (ImGuiMD2::ListItem(accounts[i].name.c_str(),
-                                       ui::i18n::Tr("profiles.account.offline"), nullptr, nullptr,
+                const char* subtitle = accounts[i].type == "msa"
+                                           ? ui::i18n::Tr("profiles.account.microsoft")
+                                           : ui::i18n::Tr("profiles.account.offline");
+                if (ImGuiMD2::ListItem(accounts[i].name.c_str(), subtitle, nullptr, nullptr,
                                        is_selected, true, ImGuiMD2::Icons::Delete, &remove_clicked) &&
                     !remove_clicked) {
                     selected = static_cast<int64_t>(i);
@@ -171,7 +231,11 @@ void BuildAccountSettings(AppState& app_state) {
     if (list_expanded) {
         ImGui::Dummy(ImVec2(0.0f, kListButtonGap));
     }
-    if (ImGuiMD2::ContainedButton(ui::i18n::Tr("profiles.accounts.add_offline"))) {
+    if (ImGuiMD2::ContainedButton(ui::i18n::Tr("profiles.accounts.add_microsoft"))) {
+        app_state.open_ms_login_request = true;
+    }
+    ImGui::SameLine();
+    if (ImGuiMD2::OutlinedButton(ui::i18n::Tr("profiles.accounts.add_offline"))) {
         app_state.open_new_account_request = true;
     }
 

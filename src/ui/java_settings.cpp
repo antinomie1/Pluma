@@ -2,6 +2,7 @@
 
 #include "config/config.h"
 #include "platform/java_locator.h"
+#include "ui/card.h"
 #include "ui/i18n.h"
 
 #include <imgui.h>
@@ -80,74 +81,6 @@ std::vector<std::string> LoadJavaPaths() {
     return deduped;
 }
 
-// Draws draw_content() as a card whose height follows its content instead of
-// a fixed constant. imgui_md2's BeginCard/EndCard need a size upfront (they
-// open a fixed-height child window), which doesn't fit content whose height
-// can change -- so this draws directly into the current (already-scrollable)
-// window with normal auto-layout, measures where the content ended, and
-// paints the card's background/shadow behind it via draw-list channel
-// splitting. Content is drawn exactly once (unlike a measure-then-redraw
-// approach), so there's no risk of double-invoking interactive widgets.
-//
-// Only safe for content whose own width comes from ImGui::CalcItemWidth()
-// (SliderFloat/TextField both do -- see PushItemWidth below) rather than
-// ImGui::GetContentRegionAvail() (ListItem and raw ImGui::CollapsingHeader
-// both do): since there's no real child window here, GetContentRegionAvail()
-// measures to the *parent* window's edge, past this card's own right
-// padding -- exactly the bug the JVM card's slider row had (see its
-// slider_width comment) before switching to CalcItemWidth(). The installs
-// list card uses ListItem/CollapsingHeader, so it stays on a real BeginCard
-// child instead (see BuildJavaSettings) -- just with an exact, computed
-// height rather than a guessed one, so it still auto-sizes to content.
-template <typename DrawContent>
-void AutoCard(DrawContent&& draw_content) {
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    const ImGuiMD2::Theme& theme = ImGuiMD2::GetTheme();
-    const float padding = ImGuiMD2::Metrics::CardPadding();
-    const ImVec2 card_min = ImGui::GetCursorScreenPos();
-    const float card_width = ImGui::GetContentRegionAvail().x;
-
-    draw_list->ChannelsSplit(2);
-    draw_list->ChannelsSetCurrent(1); // content -- painted on top of the background below
-
-    // Indent (not a one-off SetCursorScreenPos) so the left inset holds for
-    // EVERY row draw_content() draws, not just the first: ImGui::ItemSize()
-    // resets each new line's X to window->Pos.x + window->DC.Indent.x
-    // (imgui.cpp) -- i.e. the *enclosing window's* padded edge -- after
-    // every single item. A plain SetCursorScreenPos only nudges the very
-    // first item; every row after it snapped right back to the un-indented
-    // edge, flush against the card's left side with no gap at all, no matter
-    // how correctly that row's *width* was computed. Indent() bakes the
-    // extra padding into window->DC.Indent.x itself, so the automatic reset
-    // keeps applying it to every row until Unindent() below.
-    ImGui::SetCursorScreenPos(ImVec2(card_min.x, card_min.y + padding));
-    ImGui::Indent(padding);
-    ImGui::PushItemWidth(card_width - 2.0f * padding);
-    draw_content();
-    ImGui::PopItemWidth();
-    ImGui::Unindent(padding);
-    // GetCursorScreenPos() here is where the *next* item would start, which
-    // already includes the trailing ItemSpacing.y after the last widget --
-    // subtract it back out, or the bottom padding ends up padding +
-    // ItemSpacing.y instead of matching top/left/right exactly.
-    const float content_bottom = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y;
-
-    const ImVec2 card_max(card_min.x + card_width, content_bottom + padding);
-
-    draw_list->ChannelsSetCurrent(0); // background/shadow -- behind the content channel
-    ImGuiMD2::ElevationShadow(draw_list, card_min, card_max, theme.shapes.medium, 2);
-    draw_list->AddRectFilled(card_min, card_max, theme.colors.surface.U32(), theme.shapes.medium);
-    draw_list->ChannelsMerge();
-
-    // Register the whole card rect as a single item via Dummy() rather than
-    // leaving a bare SetCursorScreenPos with nothing after it -- ImGui logs
-    // "SetCursorPos used to extend parent boundaries" for that, since the
-    // parent window's content-size/scroll tracking never otherwise learns
-    // this space was consumed.
-    ImGui::SetCursorScreenPos(card_min);
-    ImGui::Dummy(ImVec2(card_max.x - card_min.x, card_max.y - card_min.y));
-}
-
 } // namespace
 
 void EnsureJavaAutoDiscovered() {
@@ -166,6 +99,8 @@ std::string SelectedJavaPath() {
     const std::vector<std::string> paths = LoadJavaPaths();
     return paths.empty() ? std::string() : paths.front();
 }
+
+std::vector<std::string> InstalledJavaPaths() { return LoadJavaPaths(); }
 
 void BuildJavaSettings() {
     config::Config& cfg = config::Config::Instance();
@@ -401,13 +336,17 @@ void MemoryAndJvmArgsControls(const char* memory_key, const char* jvm_args_key) 
         // change made via the slider above, but leaves an in-progress,
         // uncommitted edit alone (the config value doesn't change until the
         // field is committed).
-        // Per-key buffers (keyed by memory_key) so the global page and each
-        // instance page keep independent in-progress edits.
-        static std::unordered_map<std::string, std::array<char, 16>> memory_text_map;
-        static std::unordered_map<std::string, int64_t> memory_synced_map;
-        std::array<char, 16>& memory_text = memory_text_map[memory_key];
-        int64_t& memory_text_synced_value =
-            memory_synced_map.try_emplace(memory_key, int64_t{-1}).first->second;
+        // Per-key buffer (keyed by memory_key) so the global page and each
+        // instance page keep independent in-progress edits. synced defaults to
+        // -1 (an impossible MB value) so the first draw always resyncs.
+        struct MemoryEdit {
+            std::array<char, 16> text{};
+            int64_t synced = -1;
+        };
+        static std::unordered_map<std::string, MemoryEdit> memory_edit_map;
+        MemoryEdit& me = memory_edit_map[memory_key];
+        std::array<char, 16>& memory_text = me.text;
+        int64_t& memory_text_synced_value = me.synced;
         if (memory_text_synced_value != memory_mb) {
             std::snprintf(memory_text.data(), memory_text.size(), "%d",
                           static_cast<int>(memory_mb));
@@ -447,10 +386,14 @@ void MemoryAndJvmArgsControls(const char* memory_key, const char* jvm_args_key) 
         // place. Per-key (keyed by jvm_args_key) and primed once from config
         // the first time each key is seen, so multiple contexts don't share
         // one buffer -- write-on-change keeps buffer and config in sync after.
-        static std::unordered_map<std::string, std::array<char, 512>> jvm_buffer_map;
-        static std::unordered_map<std::string, bool> jvm_loaded_map;
-        std::array<char, 512>& jvm_args_buffer = jvm_buffer_map[jvm_args_key];
-        bool& jvm_args_loaded = jvm_loaded_map[jvm_args_key];
+        struct JvmEdit {
+            std::array<char, 512> buf{};
+            bool loaded = false;
+        };
+        static std::unordered_map<std::string, JvmEdit> jvm_edit_map;
+        JvmEdit& je = jvm_edit_map[jvm_args_key];
+        std::array<char, 512>& jvm_args_buffer = je.buf;
+        bool& jvm_args_loaded = je.loaded;
         if (!jvm_args_loaded) {
             const std::string current = cfg.GetString(jvm_args_key, "");
             std::snprintf(jvm_args_buffer.data(), jvm_args_buffer.size(), "%s", current.c_str());

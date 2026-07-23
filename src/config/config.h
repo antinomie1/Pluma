@@ -27,7 +27,6 @@ public:
     std::string GetString(const char* key, const char* def) const;
     bool GetBool(const char* key, bool def) const;
     int64_t GetInt(const char* key, int64_t def) const;
-    double GetDouble(const char* key, double def) const;
 
     void Set(const char* key, const std::string& value);
     // Without this overload, a `const char*` argument (e.g.
@@ -39,7 +38,6 @@ public:
     void Set(const char* key, const char* value);
     void Set(const char* key, bool value);
     void Set(const char* key, int64_t value);
-    void Set(const char* key, double value);
 
     // Hand-writes the in-memory map back to the path remembered by Load(), as
     // a flat JSON object with deterministic (sorted) key order. simdjson is
@@ -50,11 +48,10 @@ private:
     Config() = default;
 
     struct Value {
-        enum class Type { String, Bool, Int, Double } type = Type::String;
+        enum class Type { String, Bool, Int } type = Type::String;
         std::string string_value;
         bool bool_value = false;
         int64_t int_value = 0;
-        double double_value = 0.0;
     };
 
     std::string path_;

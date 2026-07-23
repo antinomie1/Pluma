@@ -1,5 +1,7 @@
 #pragma once
 
+#include "net/msa.h"
+
 #include <string>
 
 struct ImFont;
@@ -7,12 +9,13 @@ struct ImFont;
 namespace ui {
 
 // Render-thread-only navigation state: which page the bottom nav bar has
-// selected. Order matches the nav button order (Home/Download/Profiles/
-// Settings ‖ Tasks), so int(Page) doubles as the nav index. Owned by
-// render::Renderer (see renderer.h's cjk_font_ for the same
-// member-held/render-thread-exclusive/no-lock pattern) and threaded through
-// ui::BuildFrame each frame.
-enum class Page : int { Home, Download, Profiles, Settings, Tasks, Count };
+// selected. Order matches the nav button order (Home/Download/Settings ‖
+// Tasks), so int(Page) doubles as the nav index. Owned by render::Renderer (see
+// renderer.h's cjk_font_ for the same member-held/render-thread-exclusive/
+// no-lock pattern) and threaded through ui::BuildFrame each frame. Account
+// management is no longer a top-level page -- it lives as a Home sub-view (see
+// accounts_subpage below), reached from the Home action pane's account card.
+enum class Page : int { Home, Download, Settings, Tasks, Count };
 
 // Sub-navigation within the Download page's master-detail layout (left rail
 // selection). Render-thread-exclusive, same reasoning as Page.
@@ -39,6 +42,12 @@ struct AppState {
     // button clears it. Render-thread-exclusive, same reasoning as above.
     std::string instance_settings_name;
 
+    // When true, the Home page shows the account-management sub-view (the former
+    // Profiles page: account list + add Microsoft/offline), reached from the
+    // account card in the Home action pane; a Back button clears it. Same
+    // Back-to-launch-view pattern as instance_settings_name above.
+    bool accounts_subpage = false;
+
     // Profiles page new-offline-account dialog: the editable username buffer,
     // and a deferred-open flag consumed at the root window scope (the "add"
     // button lives inside the account-list card's child window, so OpenDialog
@@ -46,6 +55,14 @@ struct AppState {
     // open_new_instance_request below).
     char account_name_buf[64] = "";
     bool open_new_account_request = false;
+
+    // Microsoft device-code login. The driver owns a background thread and
+    // publishes progress; the render thread polls it each frame in the
+    // ##ms_login dialog (frame.cpp) and commits the account on success.
+    // open_ms_login_request defers OpenDialog out of the account card's child
+    // window, same reasoning as open_new_account_request above.
+    net::MsaLogin msa_login;
+    bool open_ms_login_request = false;
 
     // Real-bold font for the nav buttons (embedded Roboto-Bold + a
     // runtime-discovered bold CJK system face), set once by the renderer

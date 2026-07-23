@@ -71,6 +71,19 @@ struct LaunchParams {
     std::string jvm_args;   // extra user JVM args, space-separated
     std::string player_name;
     std::string player_uuid;
+    // Auth: for offline accounts these stay at the defaults ("0"/"legacy", which
+    // let the game start without a valid session). For a Microsoft account they
+    // carry the real Minecraft access token and user type "msa", so authenticated
+    // servers and the account's skin work.
+    std::string access_token = "0";
+    std::string user_type = "legacy";
+    // Optional window/game overrides. width/height <= 0 means "don't pass
+    // --width/--height"; extra_game_args is appended verbatim (space-split) after
+    // the version's own game args.
+    int width = 0;
+    int height = 0;
+    bool fullscreen = false;
+    std::string extra_game_args;
     // Version isolation: when true (the default), the game directory is the
     // instance's own versions/<name>/ folder (mods/saves/resourcepacks per
     // instance); when false, the shared game_dir root is used and that user

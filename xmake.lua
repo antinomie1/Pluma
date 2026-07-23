@@ -70,13 +70,6 @@ target("platform")
         add_packages("fontconfig")
     end
 
--- Simulation/business logic, ticking on its own thread.
-target("logic")
-    set_kind("static")
-    add_files("src/logic/*.cpp")
-    add_headerfiles("src/(logic/*.h)")
-    add_deps("core")
-
 -- simdjson-backed flat JSON config read/write (src/config). simdjson is
 -- read-only, so writes go through a hand-written serializer; see
 -- src/config/config.h for the render-thread-exclusive, no-lock convention
@@ -115,7 +108,7 @@ target("render")
     set_kind("static")
     add_files("src/render/*.cpp")
     add_headerfiles("src/(render/*.h)")
-    add_deps("core", "platform", "logic", "ui", "config", "net", "imgui-md2")
+    add_deps("core", "platform", "ui", "config", "net", "imgui-md2")
     add_packages("imgui", "glfw")
     if is_os("windows") then
         add_syslinks("opengl32")
@@ -127,7 +120,7 @@ target("pluma")
     set_kind("binary")
     add_files("src/*.cpp")
     add_includedirs("src")
-    add_deps("core", "platform", "logic", "ui", "render", "config", "net", "imgui-md2")
+    add_deps("core", "platform", "ui", "render", "config", "net", "imgui-md2")
     add_packages("simdjson", "glfw", "imgui", "libcurl", "miniz")
     if is_os("windows") then
         add_syslinks("dwmapi", "user32", "opengl32")

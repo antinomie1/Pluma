@@ -2,14 +2,17 @@
 
 #include "config/config.h"
 #include "platform/file_dialog.h"
+#include "ui/card.h"
 #include "ui/i18n.h"
 
 #include <imgui.h>
 #include <imgui_md2/imgui_md2.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -196,6 +199,70 @@ void BuildGameSettings() {
     }
     ImGuiMD2::Text(ImGuiMD2::TextStyle::Caption, ui::i18n::Tr("settings.game.isolation_desc"));
     ImGuiMD2::EndCard();
+
+    // Window resolution + fullscreen + custom game arguments. Global (applies to
+    // every launch); read live, write-on-change, same convention as above.
+    // width/height 0 means "don't pass --width/--height" (the game picks its
+    // own default). These feed net::LaunchParams (see PrepareLaunch's
+    // --width/--height/--fullscreen + appended game args).
+    AutoCard([&] {
+        bool fullscreen = cfg.GetBool("game.fullscreen", false);
+        if (ImGuiMD2::Switch(ui::i18n::TrLabel("settings.game.fullscreen", "game_fullscreen").c_str(),
+                             &fullscreen)) {
+            cfg.Set("game.fullscreen", fullscreen);
+            cfg.Save();
+        }
+
+        ImGuiMD2::Text(ImGuiMD2::TextStyle::Body1, ui::i18n::Tr("settings.game.resolution"));
+
+        // Width x Height. Numeric fields committed on blur/Enter; 0 (or blank)
+        // disables that dimension. Disabled while fullscreen is on, since the
+        // launcher ignores resolution then.
+        auto res_field = [&](const char* id, const char* key, bool is_width) {
+            static std::array<char, 12> w_buf{};
+            static std::array<char, 12> h_buf{};
+            std::array<char, 12>& buf = is_width ? w_buf : h_buf;
+            static int64_t w_synced = -1;
+            static int64_t h_synced = -1;
+            int64_t& synced = is_width ? w_synced : h_synced;
+            const int64_t value = std::max<int64_t>(cfg.GetInt(key, 0), 0);
+            if (synced != value) {
+                std::snprintf(buf.data(), buf.size(), "%d", static_cast<int>(value));
+                synced = value;
+            }
+            ImGuiMD2::TextFieldOptions opts;
+            opts.variant = ImGuiMD2::TextFieldVariant::Outlined;
+            opts.size = ImVec2(96.0f, 40.0f);
+            ImGuiMD2::TextField(id, buf.data(), buf.size(), opts, ImGuiInputTextFlags_CharsDecimal);
+            if (ImGui::IsItemDeactivatedAfterEdit()) {
+                cfg.Set(key, std::max<int64_t>(std::strtoll(buf.data(), nullptr, 10), 0));
+                cfg.Save();
+            }
+        };
+        ImGui::BeginDisabled(fullscreen);
+        res_field("##game_res_w", "game.res.width", true);
+        ImGui::SameLine();
+        ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, "x");
+        ImGui::SameLine();
+        res_field("##game_res_h", "game.res.height", false);
+        ImGui::EndDisabled();
+
+        // Custom game arguments appended verbatim after the version's own.
+        static std::array<char, 512> args_buf{};
+        static bool args_loaded = false;
+        if (!args_loaded) {
+            std::snprintf(args_buf.data(), args_buf.size(), "%s",
+                          cfg.GetString("game.args", "").c_str());
+            args_loaded = true;
+        }
+        ImGuiMD2::TextFieldOptions args_opts;
+        args_opts.variant = ImGuiMD2::TextFieldVariant::Outlined;
+        if (ImGuiMD2::TextField(ui::i18n::Tr("settings.game.custom_args"), args_buf.data(),
+                                args_buf.size(), args_opts)) {
+            cfg.Set("game.args", std::string(args_buf.data()));
+            cfg.Save();
+        }
+    });
 }
 
 } // namespace ui

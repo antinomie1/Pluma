@@ -33,6 +33,20 @@ constexpr const char* kUserAgent = "Pluma/1.0";
 std::mutex g_share_locks[CURL_LOCK_DATA_LAST];
 CURLSH* g_share = nullptr;
 
+// Optional outbound proxy (e.g. a local Clash/V2Ray endpoint) applied to every
+// network easy handle -- curl does NOT pick up the Windows system proxy on its
+// own, so direct connections to blocked/tampered hosts (notably *.xboxlive.com)
+// fail with SSL/connect errors. Set from the render thread via net::SetProxy
+// (from the net.proxy config key); read by worker threads when building a
+// handle, so it's mutex-guarded.
+std::mutex g_proxy_mutex;
+std::string g_proxy;
+
+std::string CurrentProxy() {
+    std::lock_guard<std::mutex> lock(g_proxy_mutex);
+    return g_proxy;
+}
+
 void ShareLock(CURL*, curl_lock_data data, curl_lock_access, void*) {
     g_share_locks[data].lock();
 }
@@ -95,6 +109,8 @@ void EnsureGlobalInit() {
 // failed to initialize.
 void ApplyShare(CURL* curl) {
     if (g_share != nullptr) curl_easy_setopt(curl, CURLOPT_SHARE, g_share);
+    const std::string proxy = CurrentProxy();
+    if (!proxy.empty()) curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
 }
 
 std::size_t DiscardBody(char*, std::size_t size, std::size_t nmemb, void*) {
@@ -457,6 +473,67 @@ std::optional<std::string> HttpGetString(const std::vector<std::string>& candida
         }
     }
     return std::nullopt;
+}
+
+HttpResponse HttpRequest(const std::string& method, const std::string& url,
+                         const std::string& body, const std::vector<std::string>& headers) {
+    EnsureGlobalInit();
+    HttpResponse response;
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) return response;
+    ApplyShare(curl);
+
+    curl_slist* header_list = nullptr;
+    for (const std::string& h : headers) {
+        header_list = curl_slist_append(header_list, h.c_str());
+    }
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, AppendToString);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, kConnectTimeoutSeconds);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, kUserAgent);
+    if (header_list != nullptr) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+    }
+    if (method == "POST") {
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        // COPYPOSTFIELDS copies the body into curl's own buffer, so `body` need
+        // not outlive the call; POSTFIELDSIZE must be set for bodies that may
+        // contain NULs (none here, but it's the documented safe pairing).
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(body.size()));
+        curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, body.c_str());
+    }
+
+    const CURLcode res = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.status);
+    if (res != CURLE_OK) {
+        response.status = 0;
+        response.error = curl_easy_strerror(res);
+    }
+    if (header_list != nullptr) curl_slist_free_all(header_list);
+    curl_easy_cleanup(curl);
+    return response;
+}
+
+void SetProxy(const std::string& proxy) {
+    std::lock_guard<std::mutex> lock(g_proxy_mutex);
+    g_proxy = proxy;
+}
+
+std::string UrlEncode(const std::string& value) {
+    EnsureGlobalInit();
+    CURL* curl = curl_easy_init();
+    if (curl == nullptr) return value;
+    char* escaped = curl_easy_escape(curl, value.c_str(), static_cast<int>(value.size()));
+    std::string out = escaped != nullptr ? std::string(escaped) : value;
+    if (escaped != nullptr) curl_free(escaped);
+    curl_easy_cleanup(curl);
+    return out;
 }
 
 bool DownloadFile(const std::vector<std::string>& candidate_urls, const std::string& dest,

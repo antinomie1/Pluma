@@ -6,7 +6,7 @@
 namespace core {
 
 // Mutex-guarded single value for cross-thread publish/snapshot. Used for
-// WindowMetrics (platform -> render) and logic State (logic -> render).
+// WindowMetrics (platform -> render) and GameMonitorState (monitor -> render).
 template <typename T>
 class SharedValue {
 public:

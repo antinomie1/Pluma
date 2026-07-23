@@ -12,10 +12,7 @@
 
 namespace platform {
 class Window;
-}
-
-namespace logic {
-class Engine;
+class GameMonitor;
 }
 
 namespace render {
@@ -25,7 +22,7 @@ namespace render {
 // here, so ImGui is only ever touched on this thread.
 class Renderer {
 public:
-    Renderer(platform::Window& window, logic::Engine& engine);
+    Renderer(platform::Window& window, platform::GameMonitor& monitor);
     ~Renderer();
 
     Renderer(const Renderer&) = delete;
@@ -49,7 +46,7 @@ private:
     std::chrono::steady_clock::time_point renderFrame();
 
     platform::Window& window_;
-    logic::Engine& engine_;
+    platform::GameMonitor& monitor_;
     std::thread thread_;
     std::atomic<bool> running_{false};
     int target_fps_ = 60;
@@ -75,7 +72,7 @@ private:
     // Minecraft download subsystem: owns its own worker/publish threads (see
     // net::DownloadManager), started/stopped alongside the render thread's
     // own lifetime in run(). Threaded through ui::BuildFrame each frame, same
-    // as app_state_/logic_state.
+    // as app_state_ / the game-monitor snapshot.
     net::DownloadManager downloads_;
 };
 

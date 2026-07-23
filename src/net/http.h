@@ -30,6 +30,34 @@ struct DownloadHooks {
 // per-version JSON, which are small enough to hold entirely in memory.
 std::optional<std::string> HttpGetString(const std::vector<std::string>& candidate_urls);
 
+// One request's outcome: the HTTP status code (0 if the transfer never
+// completed) and the response body. Used by the Microsoft-login flow, which
+// needs to see the status/body of individual POSTs (a 400 with an
+// "authorization_pending" body is a normal poll result, not a failure).
+struct HttpResponse {
+    long status = 0;      // HTTP status, or 0 if the transfer never completed
+    std::string body;
+    std::string error;    // libcurl transport error (e.g. connect/TLS/timeout) when status == 0
+};
+
+// A single HTTP request. `method` is "GET"/"POST"; `body` is sent as-is (empty
+// for GET); each `headers` entry is a full "Name: value" line (e.g.
+// "Content-Type: application/json"). No mirror/retry logic -- these endpoints
+// (Microsoft/Xbox/Minecraft auth) are fixed hosts, not mirrored downloads.
+HttpResponse HttpRequest(const std::string& method, const std::string& url,
+                         const std::string& body, const std::vector<std::string>& headers);
+
+// application/x-www-form-urlencoded percent-encoding of one value (via curl's
+// own escaper), for building auth form bodies safely.
+std::string UrlEncode(const std::string& value);
+
+// Sets the outbound proxy (e.g. "http://127.0.0.1:7890") applied to every
+// subsequent request/download; "" disables it. curl doesn't use the OS system
+// proxy on its own, so this is how the app routes through a local proxy (needed
+// where *.xboxlive.com is blocked/tampered). Call from the render thread (reads
+// the net.proxy config key); it's safe against the download worker threads.
+void SetProxy(const std::string& proxy);
+
 // Downloads one file, trying `candidate_urls` in order for the *first*
 // segment probe (a later candidate is only tried if the current one's HEAD/
 // Range probe fails outright -- once a candidate is confirmed reachable, the

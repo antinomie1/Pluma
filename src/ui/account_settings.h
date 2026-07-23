@@ -26,10 +26,23 @@ void BuildAccountSettings(AppState& app_state);
 // if it is the first account. No-op if `name` is empty.
 void CreateOfflineAccount(const std::string& name);
 
-// The selected account's username / offline UUID, or "" if none is
-// configured. Symmetric with game_settings.cpp's SelectedGameDir(); consumed
-// by the Home page launch flow.
+// Commits a Microsoft account after a successful net::MsaLogin: stores its
+// Minecraft token + Microsoft refresh token (type "msa") and selects it. If an
+// msa account with the same uuid already exists, its tokens are refreshed in
+// place rather than duplicated.
+void CommitMicrosoftAccount(const std::string& name, const std::string& uuid,
+                            const std::string& access_token, const std::string& refresh_token);
+
+// The selected account's username / UUID, or "" if none is configured.
+// Symmetric with game_settings.cpp's SelectedGameDir(); consumed by the Home
+// page launch flow.
 std::string SelectedAccountName();
 std::string SelectedAccountUuid();
+
+// The selected account's Minecraft access token ("0" for offline accounts) and
+// launch user type ("msa" for Microsoft accounts, else "legacy"). Consumed by
+// the Home page launch flow to fill net::LaunchParams.
+std::string SelectedAccountToken();
+std::string SelectedAccountType();
 
 } // namespace ui

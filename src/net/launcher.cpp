@@ -190,16 +190,29 @@ LaunchCommand PrepareLaunch(const LaunchParams& params) {
         {"${game_assets}", assets_dir},
         {"${assets_index_name}", profile.asset_index_id},
         {"${auth_uuid}", params.player_uuid},
-        {"${auth_access_token}", "0"},
+        {"${auth_access_token}", params.access_token},
         {"${clientid}", ""},
         {"${auth_xuid}", ""},
-        {"${user_type}", "legacy"},
+        {"${user_type}", params.user_type},
         {"${version_type}", profile.type},
         {"${user_properties}", "{}"},
     };
     for (const std::string& raw : profile.game_args) {
         cmd.args.push_back(Substitute(raw, vars));
     }
+
+    // Window/game overrides appended after the version's own game args (later
+    // --flags win). Resolution and fullscreen are vanilla client flags; the
+    // free-form extra args are space-split like the JVM ones.
+    if (params.fullscreen) {
+        cmd.args.push_back("--fullscreen");
+    } else if (params.width > 0 && params.height > 0) {
+        cmd.args.push_back("--width");
+        cmd.args.push_back(std::to_string(params.width));
+        cmd.args.push_back("--height");
+        cmd.args.push_back(std::to_string(params.height));
+    }
+    for (std::string& a : SplitArgs(params.extra_game_args)) cmd.args.push_back(std::move(a));
 
     return cmd;
 }

@@ -65,16 +65,9 @@ void Config::Load(const std::string& path) {
                 v.int_value = static_cast<int64_t>(u);
                 break;
             }
-            case simdjson::dom::element_type::DOUBLE: {
-                double d = 0.0;
-                if (value.get(d)) continue;
-                v.type = Value::Type::Double;
-                v.double_value = d;
-                break;
-            }
             default:
-                // ARRAY / OBJECT / NULL_VALUE: not part of the flat scalar
-                // config vocabulary -- skip.
+                // DOUBLE / ARRAY / OBJECT / NULL_VALUE: not part of the flat
+                // scalar config vocabulary -- skip.
                 continue;
         }
         values_[std::string(key)] = v;
@@ -99,12 +92,6 @@ int64_t Config::GetInt(const char* key, int64_t def) const {
     return it->second.int_value;
 }
 
-double Config::GetDouble(const char* key, double def) const {
-    auto it = values_.find(key);
-    if (it == values_.end() || it->second.type != Value::Type::Double) return def;
-    return it->second.double_value;
-}
-
 void Config::Set(const char* key, const std::string& value) {
     Value v;
     v.type = Value::Type::String;
@@ -127,13 +114,6 @@ void Config::Set(const char* key, int64_t value) {
     Value v;
     v.type = Value::Type::Int;
     v.int_value = value;
-    values_[key] = v;
-}
-
-void Config::Set(const char* key, double value) {
-    Value v;
-    v.type = Value::Type::Double;
-    v.double_value = value;
     values_[key] = v;
 }
 
@@ -185,9 +165,6 @@ void Config::Save() const {
                 break;
             case Value::Type::Int:
                 out << value.int_value;
-                break;
-            case Value::Type::Double:
-                out << value.double_value;
                 break;
         }
         ++index;

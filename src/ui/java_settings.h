@@ -14,6 +14,7 @@
 // render/renderer.cpp (before the main loop starts), and BuildJavaSettings()
 // is only called from inside ui::BuildFrame().
 #include <string>
+#include <vector>
 
 namespace ui {
 
@@ -30,6 +31,12 @@ void BuildJavaSettings();
 // (java.paths.0), or "" if none is configured. Symmetric with
 // game_settings.cpp's SelectedGameDir(); used by the Home page's launch flow.
 std::string SelectedJavaPath();
+
+// The full list of configured Java installs (java.paths.*), deduped, in
+// configured order -- the same list Settings > Java shows. Used by the
+// per-instance settings' Java picker to offer a choice among them. Empty when
+// none is configured.
+std::vector<std::string> InstalledJavaPaths();
 
 // Renders the JVM memory-size slider/field + JVM-arguments field as a card,
 // reading/writing the two given config keys. Shared by the global Java

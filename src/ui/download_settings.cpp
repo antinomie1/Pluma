@@ -1,6 +1,8 @@
 #include "ui/download_settings.h"
 
 #include "config/config.h"
+#include "net/http.h"
+#include "ui/card.h"
 #include "ui/i18n.h"
 
 #include <imgui.h>
@@ -25,42 +27,6 @@ constexpr int64_t kMinThreads = 1;
 constexpr int64_t kMaxThreads = 16;
 
 constexpr float kFieldHeight = 40.0f; // matches java_settings.cpp's kFieldHeight
-
-// Draws draw_content() as a card whose height follows its content instead of
-// a fixed constant. Duplicated from java_settings.cpp's AutoCard (see that
-// file's doc comment for the full rationale) rather than shared -- it's not
-// exposed via java_settings.h, matching this project's "small per-file UI
-// helper" convention for content sized off ImGui::CalcItemWidth() (Select/
-// SliderFloat/TextField all do) rather than ImGui::GetContentRegionAvail().
-template <typename DrawContent>
-void AutoCard(DrawContent&& draw_content) {
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    const ImGuiMD2::Theme& theme = ImGuiMD2::GetTheme();
-    const float padding = ImGuiMD2::Metrics::CardPadding();
-    const ImVec2 card_min = ImGui::GetCursorScreenPos();
-    const float card_width = ImGui::GetContentRegionAvail().x;
-
-    draw_list->ChannelsSplit(2);
-    draw_list->ChannelsSetCurrent(1);
-
-    ImGui::SetCursorScreenPos(ImVec2(card_min.x, card_min.y + padding));
-    ImGui::Indent(padding);
-    ImGui::PushItemWidth(card_width - 2.0f * padding);
-    draw_content();
-    ImGui::PopItemWidth();
-    ImGui::Unindent(padding);
-    const float content_bottom = ImGui::GetCursorScreenPos().y - ImGui::GetStyle().ItemSpacing.y;
-
-    const ImVec2 card_max(card_min.x + card_width, content_bottom + padding);
-
-    draw_list->ChannelsSetCurrent(0);
-    ImGuiMD2::ElevationShadow(draw_list, card_min, card_max, theme.shapes.medium, 2);
-    draw_list->AddRectFilled(card_min, card_max, theme.colors.surface.U32(), theme.shapes.medium);
-    draw_list->ChannelsMerge();
-
-    ImGui::SetCursorScreenPos(card_min);
-    ImGui::Dummy(ImVec2(card_max.x - card_min.x, card_max.y - card_min.y));
-}
 
 // One "label, then a slider paired with a directly-editable integer field" row
 // -- the exact idiom java_settings.cpp's JVM memory row uses, duplicated here
@@ -170,6 +136,26 @@ void BuildDownloadSettings() {
         static int64_t threads_synced = -1;
         IntSliderField("settings.download.threads", "download.threads", kMinThreads, kMaxThreads,
                        kDefaultThreads, threads_text, sizeof(threads_text), &threads_synced);
+
+        // Outbound proxy for ALL networking (downloads + Microsoft login). Empty
+        // = direct connection -- there is no default, since curl otherwise
+        // ignores the OS system proxy and most users don't need one. Applied
+        // live via net::SetProxy so it takes effect without a restart.
+        static char proxy_buf[256] = "";
+        static bool proxy_loaded = false;
+        if (!proxy_loaded) {
+            std::snprintf(proxy_buf, sizeof(proxy_buf), "%s",
+                          cfg.GetString("net.proxy", "").c_str());
+            proxy_loaded = true;
+        }
+        ImGuiMD2::TextFieldOptions proxy_opts;
+        proxy_opts.variant = ImGuiMD2::TextFieldVariant::Outlined;
+        if (ImGuiMD2::TextField(ui::i18n::Tr("settings.download.proxy"), proxy_buf,
+                                sizeof(proxy_buf), proxy_opts)) {
+            cfg.Set("net.proxy", std::string(proxy_buf));
+            cfg.Save();
+            net::SetProxy(proxy_buf);
+        }
     });
 }
 

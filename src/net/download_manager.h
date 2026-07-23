@@ -2,7 +2,8 @@
 
 // Orchestrates the Minecraft install pipeline (version JSON -> client.jar ->
 // libraries -> asset index -> asset objects) and the version-manifest fetch,
-// structured like logic::Engine (src/logic/engine.h): start()/stop() own
+// structured like platform::GameMonitor (src/platform/game_monitor.h):
+// start()/stop() own
 // every thread this class spawns, and every cross-thread read the render
 // thread does goes through core::SharedValue snapshots -- never a raw lock
 // the caller has to know about.
@@ -79,7 +80,7 @@ private:
 
     std::atomic<bool> running_{false};
 
-    // Publisher: the one always-on thread (mirrors logic::Engine's tick
+    // Publisher: the one always-on thread (mirrors platform::GameMonitor's tick
     // thread), recomputing every task's speed_bps and republishing the
     // TaskInfo snapshot on a fixed interval.
     std::thread publish_thread_;

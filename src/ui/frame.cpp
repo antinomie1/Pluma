@@ -1,10 +1,10 @@
 #include "ui/frame.h"
 
 #include "config/config.h"
-#include "logic/engine.h"
 #include "net/download_manager.h"
 #include "net/launcher.h"
 #include "net/manifest.h"
+#include "platform/game_monitor.h"
 #include "platform/process.h"
 #include "platform/window.h"
 #include "ui/account_settings.h"
@@ -31,6 +31,12 @@ namespace {
 
 constexpr float kTitlePadding = 24.0f;
 constexpr float kContentPadding = 24.0f;
+
+// Default Azure AD application id for Microsoft login (PrismLauncher's public
+// client, which has the device-code/public-client flow enabled). Overridable
+// via the auth.client_id config key -- register your own Azure app to avoid
+// depending on a borrowed client id.
+constexpr const char* kDefaultMsaClientId = "508f8b36-3caa-44cd-be00-3ba2967c541d";
 constexpr float kFabGap = 6.0f; // gap between / around the caption FABs
 
 // Bottom navigation bar.
@@ -194,8 +200,9 @@ void MasterDetail(const char* const* keys, int count, int& current, ImVec2 origi
 
 } // namespace
 
-void BuildFrame(platform::Window& window, const logic::State& logic_state,
-                ui::AppState& app_state, net::DownloadManager& downloads) {
+void BuildFrame(platform::Window& window, const platform::GameMonitorState& game_state,
+                ui::AppState& app_state, net::DownloadManager& downloads,
+                platform::GameMonitor& monitor) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -314,6 +321,164 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
                 break;
             }
 
+            // Account-management sub-view: the former Profiles page (account
+            // list + add Microsoft/offline), shown in place of the launch view
+            // and dismissed with Back. Same child-window shell as the instance
+            // settings sub-view above; reached from the account card in the
+            // right-hand action pane below.
+            if (app_state.accounts_subpage) {
+                const ImGuiMD2::Theme& theme = ImGuiMD2::GetTheme();
+                ImGui::SetCursorScreenPos(md_min);
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, theme.colors.background.Vec4());
+                ImGui::PushStyleVar(
+                    ImGuiStyleVar_WindowPadding,
+                    ImVec2(ImGuiMD2::Metrics::CardPadding(), ImGuiMD2::Metrics::CardPadding()));
+                ImGui::BeginChild("##accounts_view", md_size, ImGuiChildFlags_AlwaysUseWindowPadding);
+                if (ImGuiMD2::OutlinedButton(
+                        ui::i18n::TrLabel("instance.back", "accounts_back").c_str())) {
+                    app_state.accounts_subpage = false;
+                }
+                // Title vertically centered against the Back button and faux-
+                // bolded (double-drawn 1px apart): there is no real bold
+                // Headline6 face, so this matches the faux-bold fallback used
+                // elsewhere for CJK rather than swapping to a lighter weight.
+                // PushFont makes the 3-arg AddText / CalcTextSize use the
+                // Headline6 face at its LegacySize (no removed FontSize field).
+                const float back_top = ImGui::GetItemRectMin().y;
+                const float back_h = ImGui::GetItemRectSize().y;
+                ImGui::SameLine();
+                const ImVec2 title_pos = ImGui::GetCursorScreenPos();
+                const char* title = ui::i18n::Tr("nav.profiles");
+                ImFont* h6 = theme.fonts.Get(ImGuiMD2::TextStyle::Headline6);
+                if (h6 != nullptr) ImGui::PushFont(h6);
+                const float title_y = back_top + (back_h - ImGui::GetFontSize()) * 0.5f;
+                const ImU32 title_col = theme.colors.on_surface.U32();
+                ImDrawList* title_dl = ImGui::GetWindowDrawList();
+                title_dl->AddText(ImVec2(title_pos.x, title_y), title_col, title);
+                title_dl->AddText(ImVec2(title_pos.x + 1.0f, title_y), title_col, title);
+                const ImVec2 title_sz = ImGui::CalcTextSize(title);
+                if (h6 != nullptr) ImGui::PopFont();
+                ImGui::Dummy(ImVec2(title_sz.x + 1.0f, back_h));
+                ImGui::Dummy(ImVec2(0.0f, 12.0f));
+                ui::BuildAccountSettings(app_state);
+                ImGui::EndChild();
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor();
+
+                // Dialogs at page scope (outside the child window) so OpenDialog's
+                // popup id matches BeginDialog -- same cross-child deferral as the
+                // download page's new-instance dialog.
+                if (app_state.open_new_account_request) {
+                    app_state.account_name_buf[0] = '\0';
+                    ImGuiMD2::OpenDialog("##new_account");
+                    app_state.open_new_account_request = false;
+                }
+                if (ImGuiMD2::BeginDialog("##new_account")) {
+                    ImGuiMD2::TextH6(ui::i18n::Tr("profiles.dialog.title"));
+
+                    ImGuiMD2::TextFieldOptions name_options;
+                    name_options.variant = ImGuiMD2::TextFieldVariant::Outlined;
+                    ImGuiMD2::TextField(ui::i18n::Tr("profiles.dialog.name"),
+                                        app_state.account_name_buf,
+                                        sizeof(app_state.account_name_buf), name_options);
+
+                    if (ImGuiMD2::ContainedButton(
+                            ui::i18n::TrLabel("action.confirm", "new_account_confirm").c_str())) {
+                        if (app_state.account_name_buf[0] != '\0') {
+                            ui::CreateOfflineAccount(app_state.account_name_buf);
+                        }
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGui::SameLine();
+                    if (ImGuiMD2::TextButton(
+                            ui::i18n::TrLabel("action.cancel", "new_account_cancel").c_str())) {
+                        ImGui::CloseCurrentPopup();
+                    }
+                    ImGuiMD2::EndDialog();
+                }
+
+                // Microsoft device-code login dialog. Starting the login spins up
+                // a background thread (net::MsaLogin); this dialog polls its state
+                // each frame and, on success, commits the account through config
+                // on the render thread (the worker never touches config).
+                if (app_state.open_ms_login_request) {
+                    const std::string client_id = config::Config::Instance().GetString(
+                        "auth.client_id", kDefaultMsaClientId);
+                    app_state.msa_login.Start(client_id);
+                    ImGuiMD2::OpenDialog("##ms_login");
+                    app_state.open_ms_login_request = false;
+                }
+                if (ImGuiMD2::BeginDialog("##ms_login")) {
+                    const net::LoginState st = app_state.msa_login.state();
+                    ImGuiMD2::TextH6(ui::i18n::Tr("profiles.msa.title"));
+                    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+
+                    switch (st.phase) {
+                        case net::LoginState::Phase::Requesting:
+                            ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2,
+                                           ui::i18n::Tr("profiles.msa.requesting"));
+                            break;
+                        case net::LoginState::Phase::AwaitingUser:
+                            ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2,
+                                           ui::i18n::Tr("profiles.msa.instructions"));
+                            ImGuiMD2::Text(ImGuiMD2::TextStyle::Body1,
+                                           st.verification_uri.c_str());
+                            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+                            ImGuiMD2::TextH5(st.user_code.c_str());
+                            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+                            if (ImGuiMD2::OutlinedButton(ui::i18n::Tr("profiles.msa.copy_code"))) {
+                                ImGui::SetClipboardText(st.user_code.c_str());
+                            }
+                            ImGui::SameLine();
+                            if (ImGuiMD2::OutlinedButton(ui::i18n::Tr("profiles.msa.copy_link"))) {
+                                ImGui::SetClipboardText(st.verification_uri.c_str());
+                            }
+                            break;
+                        case net::LoginState::Phase::Authenticating:
+                            ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2,
+                                           ui::i18n::Tr("profiles.msa.authenticating"));
+                            break;
+                        case net::LoginState::Phase::Success:
+                            ui::CommitMicrosoftAccount(st.name, st.uuid, st.access_token,
+                                                       st.refresh_token);
+                            app_state.msa_login.Reset();
+                            std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg),
+                                          ui::i18n::Tr("profiles.msa.logged_in"), st.name.c_str());
+                            app_state.snackbar_open = true;
+                            ImGui::CloseCurrentPopup();
+                            break;
+                        case net::LoginState::Phase::Error:
+                            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 380.0f);
+                            ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, st.error.c_str());
+                            ImGui::PopTextWrapPos();
+                            break;
+                        default:
+                            ImGui::CloseCurrentPopup();
+                            break;
+                    }
+
+                    ImGui::Dummy(ImVec2(0.0f, 12.0f));
+                    if (st.phase == net::LoginState::Phase::Error) {
+                        if (ImGuiMD2::ContainedButton(
+                                ui::i18n::TrLabel("action.close", "ms_login_close").c_str())) {
+                            app_state.msa_login.Reset();
+                            ImGui::CloseCurrentPopup();
+                        }
+                    } else if (st.phase != net::LoginState::Phase::Success) {
+                        // Cancel joins the worker (may briefly block if a request
+                        // is in flight; the common cancel -- during the poll wait
+                        // -- returns within ~100ms).
+                        if (ImGuiMD2::TextButton(
+                                ui::i18n::TrLabel("action.cancel", "ms_login_cancel").c_str())) {
+                            app_state.msa_login.Cancel();
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                    ImGuiMD2::EndDialog();
+                }
+                break;
+            }
+
             // Two-pane launch home: a wide instance list on the left (scanned
             // from the selected game directory's versions/), and a narrower
             // action pane on the right with the Start button pinned to its
@@ -332,6 +497,14 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
                 instances.empty() ? nullptr
                                    : &instances[static_cast<std::size_t>(app_state.home_selected)];
 
+            // Which instances are currently running, per the game-monitor thread's
+            // process monitor (game_state.running_games, refreshed each tick).
+            const auto is_running = [&](const std::string& name) {
+                return std::find(game_state.running_games.begin(),
+                                 game_state.running_games.end(),
+                                 name) != game_state.running_games.end();
+            };
+
             constexpr float kListFraction = 0.62f;
             const float left_w = (md_size.x - kCardGap) * kListFraction;
             const float right_w = (md_size.x - kCardGap) - left_w;
@@ -349,8 +522,10 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
             } else {
                 for (std::size_t i = 0; i < instances.size(); ++i) {
                     const bool is_selected = (static_cast<int>(i) == app_state.home_selected);
+                    const char* trailing =
+                        is_running(instances[i].name) ? ui::i18n::Tr("home.running") : nullptr;
                     if (ImGuiMD2::ListItem(instances[i].name.c_str(),
-                                           instances[i].version_id.c_str(), nullptr, nullptr,
+                                           instances[i].version_id.c_str(), nullptr, trailing,
                                            is_selected)) {
                         app_state.home_selected = static_cast<int>(i);
                     }
@@ -359,11 +534,39 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
             ImGui::EndChild();
             ImGuiMD2::EndCard();
 
-            ImGui::SameLine(0.0f, kCardGap);
+            // Right column, split top/bottom: an account summary card above,
+            // the action pane (instance info + settings + Start) below. Both are
+            // positioned explicitly (not SameLine) so they can stack.
+            const float right_x = md_min.x + left_w + kCardGap;
+            const float account_card_h =
+                2.0f * ImGuiMD2::Metrics::CardPadding() + ImGuiMD2::Metrics::ListRowHeightTwoLine();
 
-            // Right: action pane. Selected-instance info at the top, Start
+            // Top: current-account card -- one clickable row (username + account
+            // type, or a "not signed in" prompt) that opens the account-
+            // management sub-view (the former Profiles page).
+            ImGui::SetCursorScreenPos(ImVec2(right_x, md_min.y));
+            ImGuiMD2::BeginCard("##home_account", ImVec2(right_w, account_card_h), 2);
+            {
+                const std::string acct_name = ui::SelectedAccountName();
+                const bool has_account = !acct_name.empty();
+                const char* acct_title =
+                    has_account ? acct_name.c_str() : ui::i18n::Tr("home.no_account");
+                const char* acct_sub =
+                    has_account ? (ui::SelectedAccountType() == "msa"
+                                       ? ui::i18n::Tr("profiles.account.microsoft")
+                                       : ui::i18n::Tr("profiles.account.offline"))
+                                : ui::i18n::Tr("home.tap_to_add");
+                if (ImGuiMD2::ListItem(acct_title, acct_sub, nullptr, nullptr, false)) {
+                    app_state.accounts_subpage = true;
+                }
+            }
+            ImGuiMD2::EndCard();
+
+            // Bottom: action pane. Selected-instance info at the top, Start
             // button pinned to the bottom.
-            ImGuiMD2::BeginCard("##home_actions", ImVec2(right_w, md_size.y), 2);
+            ImGui::SetCursorScreenPos(ImVec2(right_x, md_min.y + account_card_h + kCardGap));
+            ImGuiMD2::BeginCard("##home_actions",
+                                ImVec2(right_w, md_size.y - account_card_h - kCardGap), 2);
             if (selected_instance != nullptr) {
                 ImGuiMD2::Text(ImGuiMD2::TextStyle::Subtitle1, selected_instance->name.c_str());
                 ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, selected_instance->version_id.c_str());
@@ -385,15 +588,21 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
                     ImVec2(ImGui::GetContentRegionAvail().x, 0.0f))) {
                 app_state.instance_settings_name = selected_instance->name;
             }
-            // Enabled whenever an instance is selected; missing Java/account is
-            // reported via the snackbar on click (rather than a silent disable)
-            // so the reason is visible.
-            ImGui::BeginDisabled(selected_instance == nullptr);
-            if (ImGuiMD2::ContainedButton(ui::i18n::TrLabel("home.start", "home_start").c_str(),
-                                          ImVec2(ImGui::GetContentRegionAvail().x, 0.0f)) &&
+            // Enabled whenever an instance is selected and not already running;
+            // missing Java/account is reported via the snackbar on click
+            // (rather than a silent disable) so the reason is visible. A running
+            // instance shows "Running" and is disabled (relaunching the same
+            // isolated instance would collide on its game directory).
+            const bool selected_running =
+                selected_instance != nullptr && is_running(selected_instance->name);
+            ImGui::BeginDisabled(selected_instance == nullptr || selected_running);
+            if (ImGuiMD2::ContainedButton(
+                    ui::i18n::TrLabel(selected_running ? "home.running" : "home.start", "home_start")
+                        .c_str(),
+                    ImVec2(ImGui::GetContentRegionAvail().x, 0.0f)) &&
                 selected_instance != nullptr) {
                 config::Config& cfg = config::Config::Instance();
-                const std::string java = ui::SelectedJavaPath();
+                const std::string java = ui::InstanceJavaPath(selected_instance->name);
                 const std::string player = ui::SelectedAccountName();
                 if (java.empty()) {
                     std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg), "%s",
@@ -413,13 +622,25 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
                     lp.jvm_args = ui::InstanceJvmArgs(selected_instance->name);
                     lp.player_name = player;
                     lp.player_uuid = ui::SelectedAccountUuid();
+                    lp.access_token = ui::SelectedAccountToken();
+                    lp.user_type = ui::SelectedAccountType();
                     lp.isolate_instance = cfg.GetBool("game.isolation", true);
+                    lp.width = static_cast<int>(cfg.GetInt("game.res.width", 0));
+                    lp.height = static_cast<int>(cfg.GetInt("game.res.height", 0));
+                    lp.fullscreen = cfg.GetBool("game.fullscreen", false);
+                    lp.extra_game_args = cfg.GetString("game.args", "");
 
                     const net::LaunchCommand lc = net::PrepareLaunch(lp);
+                    const platform::ProcessHandle proc =
+                        lc.error.empty() ? platform::LaunchProcess(lc.exe, lc.args, lc.cwd)
+                                         : platform::ProcessHandle{0};
                     if (!lc.error.empty()) {
                         std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg),
                                       ui::i18n::Tr("home.launch.failed"), lc.error.c_str());
-                    } else if (platform::LaunchProcess(lc.exe, lc.args, lc.cwd)) {
+                    } else if (proc != 0) {
+                        // Hand the live process to the game-monitor thread;
+                        // it drives the "running" state the list shows below.
+                        monitor.TrackGame(lp.instance_name, proc);
                         std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg),
                                       ui::i18n::Tr("home.launch.started"), lp.instance_name.c_str());
                     } else {
@@ -580,28 +801,6 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
                 app_state.open_new_instance_request = false;
             }
 
-            // Dialog scrim: instead of ImGui's full-viewport modal dim (disabled
-            // in imgui_md2's ApplyTheme), dim only the center content region so
-            // the top bar and bottom nav stay lit. A plain translucent window
-            // over the md rect: created after the page content/cards so it sits
-            // above them, and always below the modal popup (popups render atop
-            // normal windows), so the dialog itself isn't dimmed.
-            if (ImGui::IsPopupOpen("##new_instance")) {
-                const ImGuiMD2::Theme& t = ImGuiMD2::GetTheme();
-                ImGui::SetNextWindowPos(md_min);
-                ImGui::SetNextWindowSize(md_size);
-                ImGui::PushStyleColor(ImGuiCol_WindowBg, t.colors.scrim.Vec4());
-                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, t.shapes.medium);
-                ImGui::Begin("##dialog_scrim", nullptr,
-                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
-                                 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
-                                 ImGuiWindowFlags_NoBringToFrontOnFocus);
-                ImGui::End();
-                ImGui::PopStyleVar();
-                ImGui::PopStyleColor();
-            }
-
             // New-instance dialog: BeginDialog must be called every frame
             // (it's a thin wrapper over ImGui::BeginPopupModal, which only
             // actually opens once OpenDialog()'s matching ImGui::OpenPopup
@@ -653,45 +852,6 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
                 ImGui::SameLine();
                 if (ImGuiMD2::TextButton(
                         ui::i18n::TrLabel("action.cancel", "new_instance_cancel").c_str())) {
-                    ImGui::CloseCurrentPopup();
-                }
-
-                ImGuiMD2::EndDialog();
-            }
-            break;
-        }
-        case Page::Profiles: {
-            ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("nav.profiles"));
-            ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            ui::BuildAccountSettings(app_state);
-
-            // Open the new-offline-account dialog here, at the root window
-            // scope (the "add" button that requests it lives inside the
-            // account-list card's child window) -- same OpenDialog scoping
-            // reasoning as the download page's new-instance dialog.
-            if (app_state.open_new_account_request) {
-                app_state.account_name_buf[0] = '\0';
-                ImGuiMD2::OpenDialog("##new_account");
-                app_state.open_new_account_request = false;
-            }
-            if (ImGuiMD2::BeginDialog("##new_account")) {
-                ImGuiMD2::TextH6(ui::i18n::Tr("profiles.dialog.title"));
-
-                ImGuiMD2::TextFieldOptions name_options;
-                name_options.variant = ImGuiMD2::TextFieldVariant::Outlined;
-                ImGuiMD2::TextField(ui::i18n::Tr("profiles.dialog.name"), app_state.account_name_buf,
-                                    sizeof(app_state.account_name_buf), name_options);
-
-                if (ImGuiMD2::ContainedButton(
-                        ui::i18n::TrLabel("action.confirm", "new_account_confirm").c_str())) {
-                    if (app_state.account_name_buf[0] != '\0') {
-                        ui::CreateOfflineAccount(app_state.account_name_buf);
-                    }
-                    ImGui::CloseCurrentPopup();
-                }
-                ImGui::SameLine();
-                if (ImGuiMD2::TextButton(
-                        ui::i18n::TrLabel("action.cancel", "new_account_cancel").c_str())) {
                     ImGui::CloseCurrentPopup();
                 }
 
@@ -922,7 +1082,8 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
     ImFont* prev_btn_font = btn_slot;
     if (app_state.nav_bold_font) btn_slot = app_state.nav_bold_font;
 
-    // Left group: Home / Download / Profiles / Settings, flowing left-to-right.
+    // Left group: Home / Download / Settings, flowing left-to-right. (Account
+    // management moved off the nav into a Home sub-view -- see accounts_subpage.)
     ImGui::SetCursorScreenPos(ImVec2(win_pos.x + kNavEdgeGap, nav_btn_y));
     if (NavButton(Page::Home, "nav.home", "nav_home")) {
         app_state.current_page = Page::Home;
@@ -930,10 +1091,6 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
     ImGui::SameLine(0.0f, kNavItemGap);
     if (NavButton(Page::Download, "nav.download", "nav_download")) {
         app_state.current_page = Page::Download;
-    }
-    ImGui::SameLine(0.0f, kNavItemGap);
-    if (NavButton(Page::Profiles, "nav.profiles", "nav_profiles")) {
-        app_state.current_page = Page::Profiles;
     }
     ImGui::SameLine(0.0f, kNavItemGap);
     if (NavButton(Page::Settings, "nav.settings", "nav_settings")) {
