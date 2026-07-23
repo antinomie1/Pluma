@@ -17,6 +17,17 @@ ImGuiMD2::Theme MakeTheme(bool dark, ImGuiMD2::Swatch accent) {
     // The app-bar FABs draw from the secondary color: a vivid accent container
     // with white icons (force on_secondary so the icons stay white on it).
     theme.colors.on_secondary = ImGuiMD2::Color::FromHex(0xffffff);
+    // Green/Amber/Orange at S700 are light enough that AccessibleOnColor's WCAG
+    // contrast pick lands on black instead of white (see imgui_md2/theme.cpp),
+    // unlike the other light-mode swatches. Force white so every primary-
+    // colored surface -- app bar title/FAB icons (theme.on_app_bar) and
+    // contained buttons/switch marks (theme.colors.on_primary, see
+    // components.cpp) -- stays consistent across every accent.
+    if (!dark && (accent == ImGuiMD2::Swatch::Green || accent == ImGuiMD2::Swatch::Amber ||
+                  accent == ImGuiMD2::Swatch::Orange)) {
+        theme.colors.on_primary = ImGuiMD2::Color::FromHex(0xffffff);
+        theme.on_app_bar = theme.colors.on_primary;
+    }
     theme.name = dark ? "pluma_dark" : "pluma_light";
     return theme;
 }

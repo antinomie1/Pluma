@@ -30,6 +30,10 @@ namespace {
 
 WNDPROC g_prev_proc = nullptr;
 Window* g_window = nullptr;
+// Tracks whether we're inside a WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE span, so
+// WM_SIZE only drives a synchronous resize-tick repaint during an actual
+// live border-drag (not e.g. a programmatic resize or restore-from-minimize).
+bool g_resizing = false;
 
 UINT dpi_for(HWND hwnd) {
     const UINT dpi = GetDpiForWindow(hwnd);
@@ -107,8 +111,35 @@ LRESULT CALLBACK chrome_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
             const LRESULT result = CallWindowProcW(g_prev_proc, hwnd, msg, wparam, lparam);
             const UINT dpi = dpi_for(hwnd);
             auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
-            info->ptMinTrackSize.x = MulDiv(400, dpi, 96);
-            info->ptMinTrackSize.y = MulDiv(300, dpi, 96);
+            info->ptMinTrackSize.x = MulDiv(700, dpi, 96);
+            info->ptMinTrackSize.y = MulDiv(400, dpi, 96);
+            return result;
+        }
+        case WM_ENTERSIZEMOVE: {
+            // Delegate first so GLFW's own handling runs, then hand the GL
+            // context to the main thread for the duration of the drag (see
+            // Window::beginInteractiveResize()).
+            const LRESULT result = CallWindowProcW(g_prev_proc, hwnd, msg, wparam, lparam);
+            g_resizing = true;
+            g_window->beginInteractiveResize();
+            return result;
+        }
+        case WM_SIZE: {
+            // Delegate first so GLFW's size/framebuffer callbacks have already
+            // refreshed metrics_, then, if this WM_SIZE is part of a live
+            // border-drag, synchronously draw+present one frame so DWM never
+            // has to stretch a stale backbuffer between the render thread's
+            // (now-paused) swaps.
+            const LRESULT result = CallWindowProcW(g_prev_proc, hwnd, msg, wparam, lparam);
+            if (g_resizing) {
+                g_window->renderResizeTick();
+            }
+            return result;
+        }
+        case WM_EXITSIZEMOVE: {
+            const LRESULT result = CallWindowProcW(g_prev_proc, hwnd, msg, wparam, lparam);
+            g_resizing = false;
+            g_window->endInteractiveResize();
             return result;
         }
         default:

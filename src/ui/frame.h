@@ -8,6 +8,10 @@ namespace logic {
 struct State;
 }
 
+namespace net {
+class DownloadManager;
+}
+
 namespace ui {
 
 struct AppState;
@@ -16,6 +20,6 @@ struct AppState;
 // ImGui/imgui-md2 (no GL, no direct GLFW); window controls route through
 // platform::Window. Called on the render thread only.
 void BuildFrame(platform::Window& window, const logic::State& logic_state,
-                ui::AppState& app_state);
+                ui::AppState& app_state, net::DownloadManager& downloads);
 
 } // namespace ui

@@ -3,33 +3,94 @@
   Simplified Chinese language pack for Pluma's i18n system.
 
   Build-time source only: see assets/lang/en.xml for how this is consumed by
-  scripts/generate_embedded_languages.ps1. Keep status.ticks' %llu / %.1f
-  format specifiers, their order, and the double space between them intact:
-  they are consumed by a C printf-style call (std::snprintf), which is purely
-  positional (non-numbered) in this codebase.
+  scripts/generate_embedded_languages.ps1. Any value with printf-style format
+  specifiers (e.g. the %d in *_header keys, the %s in home.launch.* /
+  download.task_added) must keep those specifiers and their order intact:
+  they are consumed by C std::snprintf calls, which are purely positional
+  (non-numbered) in this codebase.
 -->
 <language code="zh-CN" name="简体中文">
-  <string key="action.primary">主要操作</string>
+  <string key="action.cancel">取消</string>
+  <string key="action.confirm">确认</string>
+  <string key="action.pause">暂停</string>
+  <string key="action.resume">继续</string>
   <string key="app.title">Pluma</string>
-  <string key="content.body">事件、渲染与逻辑线程正在独立运行。</string>
-  <string key="content.heading">框架骨架</string>
-  <string key="demo.switch">演示开关</string>
+  <string key="download.dialog.info.id">版本号</string>
+  <string key="download.dialog.info.time">发布时间</string>
+  <string key="download.dialog.info.type">类型</string>
+  <string key="download.dialog.name">实例名称</string>
+  <string key="download.dialog.title">新建实例</string>
   <string key="download.games">游戏</string>
+  <string key="download.load_failed">版本列表加载失败。</string>
+  <string key="download.loading">正在加载版本…</string>
   <string key="download.mods">模组</string>
+  <string key="download.refresh">刷新</string>
+  <string key="download.task_added">已添加下载任务：%s</string>
+  <string key="download.type.old_alpha">远古版</string>
+  <string key="download.type.old_beta">Beta 版</string>
+  <string key="download.type.release">正式版</string>
+  <string key="download.type.snapshot">快照版</string>
+  <string key="home.empty">暂无实例，请先在下载页下载一个。</string>
+  <string key="home.instances_header">实例（%d）</string>
+  <string key="home.launch.failed">启动失败：%s</string>
+  <string key="home.launch.no_account">请先在档案管理中创建一个账号。</string>
+  <string key="home.launch.no_java">请先在设置中配置 Java。</string>
+  <string key="home.launch.started">正在启动 %s…</string>
+  <string key="home.start">开始游戏</string>
+  <string key="instance.back">返回</string>
+  <string key="instance.override">启用独立设置</string>
+  <string key="instance.override_desc">仅为该实例覆盖全局设置。</string>
+  <string key="instance.settings">游戏设置</string>
   <string key="nav.download">下载</string>
   <string key="nav.home">主页</string>
   <string key="nav.profiles">档案管理</string>
   <string key="nav.settings">设置</string>
   <string key="nav.tasks">任务</string>
   <string key="page.wip">此页面正在建设中。</string>
+  <string key="profiles.account.offline">离线</string>
+  <string key="profiles.accounts.add_offline">添加离线账号</string>
+  <string key="profiles.accounts.empty">尚无账号。</string>
+  <string key="profiles.accounts_header">账号（%d）</string>
+  <string key="profiles.dialog.name">用户名</string>
+  <string key="profiles.dialog.title">新建离线账号</string>
   <string key="settings.about">关于</string>
   <string key="settings.accent">主色</string>
   <string key="settings.appearance">界面与主题</string>
   <string key="settings.dark_mode">深色模式</string>
+  <string key="settings.download">下载</string>
+  <string key="settings.download.concurrency">并发数</string>
+  <string key="settings.download.mirror">镜像源</string>
+  <string key="settings.download.mirror.auto">自动（BMCLAPI 优先，官方回退）</string>
+  <string key="settings.download.mirror.bmclapi">仅 BMCLAPI</string>
+  <string key="settings.download.mirror.official">仅官方</string>
+  <string key="settings.download.threads">单文件线程数</string>
   <string key="settings.game">游戏</string>
+  <string key="settings.game.add">添加目录</string>
+  <string key="settings.game.browse">浏览…</string>
+  <string key="settings.game.dirs_header">游戏目录（%d）</string>
+  <string key="settings.game.empty">尚未配置任何游戏目录。</string>
+  <string key="settings.game.isolation">版本隔离</string>
+  <string key="settings.game.isolation_desc">让每个实例的模组、存档、资源包等保存在各自目录下。</string>
   <string key="settings.java">Java</string>
+  <string key="settings.java.auto_find">自动寻找 Java</string>
+  <string key="settings.java.browse">浏览…</string>
+  <string key="settings.java.empty">尚未配置任何 Java。</string>
+  <string key="settings.java.installs_header">已配置的 Java (%d)</string>
+  <string key="settings.java.jvm_args">JVM 参数</string>
+  <string key="settings.java.memory">JVM 内存大小</string>
   <string key="settings.language">语言</string>
   <string key="settings.project_url">项目地址</string>
   <string key="settings.theme">主题</string>
-  <string key="status.ticks">逻辑计数：%llu  (运行时间 %.1f 秒)</string>
+  <string key="tasks.empty">暂无任务。</string>
+  <string key="tasks.phase.assets">资源文件</string>
+  <string key="tasks.phase.client">游戏本体</string>
+  <string key="tasks.phase.done">已完成</string>
+  <string key="tasks.phase.json">版本信息</string>
+  <string key="tasks.phase.libraries">依赖库</string>
+  <string key="tasks.speed">%.1f MB/s</string>
+  <string key="tasks.status.done">已完成</string>
+  <string key="tasks.status.downloading">下载中</string>
+  <string key="tasks.status.error">出错</string>
+  <string key="tasks.status.paused">已暂停</string>
+  <string key="tasks.status.queued">排队中</string>
 </language>

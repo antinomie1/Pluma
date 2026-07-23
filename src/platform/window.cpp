@@ -112,6 +112,11 @@ Window::Window(const std::string& title, int width, int height) {
         glfwTerminate();
         std::abort();
     }
+    // Below this, the settings master-detail rail/cards and app-bar controls
+    // start overlapping/clipping instead of reflowing -- the UI has no
+    // narrower layout to fall back to.
+    glfwSetWindowSizeLimits(window, 700, 400, GLFW_DONT_CARE, GLFW_DONT_CARE);
+
     handle_ = window;
     glfwSetWindowUserPointer(window, this);
 
@@ -120,6 +125,11 @@ Window::Window(const std::string& title, int width, int height) {
     initial.height = height;
     metrics_.store(initial);
     refresh_sizes(window, metrics_);
+
+    // Closed until the render thread actually releases the GL context (see
+    // beginInteractiveResize()); starting open would let beginInteractiveResize()
+    // race ahead of the render thread and grab the context while it's still in use.
+    resize_context_ready_gate_.close();
 
     glfwSetCursorPosCallback(window, [](GLFWwindow* w, double x, double y) {
         core::InputEvent e;
@@ -166,10 +176,11 @@ Window::Window(const std::string& title, int width, int height) {
         e.codepoint = codepoint;
         self(w)->events_.push(e);
     });
+    // glfwSetWindowSizeCallback deliberately not registered: the framebuffer
+    // callback below fires 1:1 with it on Windows and refresh_sizes() already
+    // reads both the window size and framebuffer size, so registering both
+    // would just double-lock the metrics mutex per resize tick for no benefit.
     glfwSetFramebufferSizeCallback(window, [](GLFWwindow* w, int, int) {
-        refresh_sizes(w, self(w)->metrics_);
-    });
-    glfwSetWindowSizeCallback(window, [](GLFWwindow* w, int, int) {
         refresh_sizes(w, self(w)->metrics_);
     });
     glfwSetWindowContentScaleCallback(window, [](GLFWwindow* w, float, float) {
@@ -203,6 +214,8 @@ Window::Window(const std::string& title, int width, int height) {
 
 Window::~Window() {
     render_gate_.stop();
+    resize_pause_gate_.stop();
+    resize_context_ready_gate_.stop();
     if (handle_ != nullptr) {
         glfwDestroyWindow(as_glfw(handle_));
         handle_ = nullptr;
@@ -226,6 +239,35 @@ void Window::makeContextCurrent() { glfwMakeContextCurrent(as_glfw(handle_)); }
 void Window::detachContext() { glfwMakeContextCurrent(nullptr); }
 void Window::swapBuffers() { glfwSwapBuffers(as_glfw(handle_)); }
 void Window::setSwapInterval(int interval) { glfwSwapInterval(interval); }
+
+void Window::beginInteractiveResize() {
+    resize_pause_requested_.store(true, std::memory_order_release);
+    resize_pause_gate_.close();
+    // Wait for the render thread to actually detach the context. If stop()
+    // fires instead (shutdown racing a drag), bail without touching the
+    // context -- the render thread is on its way out either way.
+    if (!resize_context_ready_gate_.wait()) {
+        return;
+    }
+    resize_context_ready_gate_.close(); // reset for the next resize cycle
+    makeContextCurrent();
+}
+
+void Window::renderResizeTick() {
+    if (resize_render_callback_) {
+        resize_render_callback_();
+    }
+}
+
+void Window::endInteractiveResize() {
+    detachContext();
+    resize_pause_requested_.store(false, std::memory_order_release);
+    resize_pause_gate_.open();
+}
+
+void Window::setResizeRenderCallback(std::function<void()> callback) {
+    resize_render_callback_ = std::move(callback);
+}
 
 void Window::minimize() {
     minimize_requested_.store(true);

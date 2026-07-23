@@ -2,14 +2,24 @@
 
 #include "config/config.h"
 #include "logic/engine.h"
+#include "net/download_manager.h"
+#include "net/launcher.h"
+#include "net/manifest.h"
+#include "platform/process.h"
 #include "platform/window.h"
+#include "ui/account_settings.h"
 #include "ui/app_state.h"
+#include "ui/download_settings.h"
+#include "ui/game_settings.h"
 #include "ui/i18n.h"
+#include "ui/instance_settings.h"
+#include "ui/java_settings.h"
 #include "ui/theme.h"
 
 #include <imgui.h>
 #include <imgui_md2/imgui_md2.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -62,6 +72,45 @@ const char* const kAccentNames[kAccentCount] = {
 // Icons:: constant for it; valid because the embedded icon font covers PUA.
 constexpr const char* kMinimizeIcon = "\xee\x85\x9b";
 
+// Material Icons "play_arrow"/"pause" glyphs (U+E037/U+E034) for the Tasks
+// page's per-row resume/pause action. Same situation as kMinimizeIcon above:
+// no ImGuiMD2::Icons:: constant exists for either.
+constexpr const char* kPlayIcon = "\xee\x80\xb7";
+constexpr const char* kPauseIcon = "\xee\x80\xb4";
+
+// Resolves the download.mirror config string ("auto"/"official"/"bmclapi",
+// defaulting to "auto") to its net::MirrorMode -- shared by the Download
+// page's refresh button and the new-instance dialog's confirm handler so
+// both always agree with what Settings > Download currently has selected.
+net::MirrorMode MirrorModeFromConfig(config::Config& cfg) {
+    const std::string mode = cfg.GetString("download.mirror", "auto");
+    if (mode == "official") return net::MirrorMode::OfficialOnly;
+    if (mode == "bmclapi") return net::MirrorMode::BmclapiOnly;
+    return net::MirrorMode::Auto;
+}
+
+// Tasks page label lookups -- net::TaskInfo::Phase/Status to their i18n key.
+const char* PhaseLabel(net::TaskInfo::Phase phase) {
+    switch (phase) {
+        case net::TaskInfo::Phase::Json: return ui::i18n::Tr("tasks.phase.json");
+        case net::TaskInfo::Phase::Client: return ui::i18n::Tr("tasks.phase.client");
+        case net::TaskInfo::Phase::Libraries: return ui::i18n::Tr("tasks.phase.libraries");
+        case net::TaskInfo::Phase::Assets: return ui::i18n::Tr("tasks.phase.assets");
+        case net::TaskInfo::Phase::Done: return ui::i18n::Tr("tasks.phase.done");
+    }
+    return "";
+}
+const char* StatusLabel(net::TaskInfo::Status status) {
+    switch (status) {
+        case net::TaskInfo::Status::Queued: return ui::i18n::Tr("tasks.status.queued");
+        case net::TaskInfo::Status::Running: return ui::i18n::Tr("tasks.status.downloading");
+        case net::TaskInfo::Status::Paused: return ui::i18n::Tr("tasks.status.paused");
+        case net::TaskInfo::Status::Done: return ui::i18n::Tr("tasks.status.done");
+        case net::TaskInfo::Status::Error: return ui::i18n::Tr("tasks.status.error");
+    }
+    return "";
+}
+
 // Predicts the auto width of an ImGuiMD2::ContainedButton for `visible_utf8`,
 // replicating Button's own formula (imgui_md2/src/components.cpp): the visible
 // text is ASCII-uppercased (CJK left untouched, matching MD2's Uppercase),
@@ -86,13 +135,24 @@ float NavButtonWidth(const char* visible_utf8) {
 // then hands off to `draw_detail` for the right-hand content filling the
 // rest of the row. Rail rows use plain Tr() (no "###" suffix): selection
 // state lives in AppState, not widget-internal state, so there is no
-// identity to preserve across a language switch. Both rail and detail render
-// as elevated cards (BeginCard/EndCard: shadow + rounding + surface fill +
-// 16dp inner padding), anchored at `origin` and filling `size` so they align
-// to the same edges as the surrounding content region.
+// identity to preserve across a language switch. The rail always renders as
+// an elevated card (BeginCard/EndCard: shadow + rounding + surface fill +
+// 16dp inner padding); the detail side does too by default (`detail_card =
+// true`), anchored at `origin` and filling `size` so they align to the same
+// edges as the surrounding content region.
+//
+// Pass `detail_card = false` when `draw_detail` builds its own elevated
+// card(s) (e.g. Java settings' separate installs/JVM cards): imgui_md2's
+// SurfaceForElevation() returns the same flat white for any elevation in
+// light mode (imgui_md2/src/components.cpp), so a card nested inside this
+// card-in-card would be visually indistinguishable from its container except
+// for a faint shadow line. With `detail_card = false`, the detail region is
+// a plain (background-colored, not surface-colored) scrollable area instead,
+// so a caller's own cards float against the page background and actually
+// read as separate cards.
 template <typename DrawDetail>
 void MasterDetail(const char* const* keys, int count, int& current, ImVec2 origin,
-                   ImVec2 size, DrawDetail&& draw_detail) {
+                   ImVec2 size, DrawDetail&& draw_detail, bool detail_card = true) {
     ImGui::SetCursorScreenPos(origin);
     ImGuiMD2::BeginCard("##rail", ImVec2(kRailWidth, size.y), 2);
     for (int i = 0; i < count; ++i) {
@@ -102,15 +162,40 @@ void MasterDetail(const char* const* keys, int count, int& current, ImVec2 origi
     }
     ImGuiMD2::EndCard();
     ImGui::SameLine(0.0f, kCardGap);
-    ImGuiMD2::BeginCard("##detail", ImVec2(size.x - kRailWidth - kCardGap, size.y), 2);
-    draw_detail();
-    ImGuiMD2::EndCard();
+
+    const ImVec2 detail_size(size.x - kRailWidth - kCardGap, size.y);
+    if (detail_card) {
+        ImGuiMD2::BeginCard("##detail", detail_size, 2);
+        // BeginCard's child window disables scrolling (fine for the short
+        // static pages it was designed for), but a detail page's content can
+        // grow taller than the fixed card height. Nest a plain scrollable
+        // child so overflow is reachable instead of silently clipped,
+        // without changing BeginCard's behavior for every other card.
+        ImGui::BeginChild("##detail_scroll", ImVec2(0.0f, 0.0f));
+        draw_detail();
+        ImGui::EndChild();
+        ImGuiMD2::EndCard();
+    } else {
+        const ImGuiMD2::Theme& theme = ImGuiMD2::GetTheme();
+        // ChildBg's global default is theme.colors.surface (see
+        // imgui_md2/src/theme.cpp's ApplyTheme -- every plain child is
+        // surface-colored, matching cards, unless overridden), so this needs
+        // an explicit override to the page's own background tone.
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, theme.colors.background.Vec4());
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                            ImVec2(ImGuiMD2::Metrics::CardPadding(), ImGuiMD2::Metrics::CardPadding()));
+        ImGui::BeginChild("##detail_plain", detail_size, ImGuiChildFlags_AlwaysUseWindowPadding);
+        draw_detail();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor();
+    }
 }
 
 } // namespace
 
 void BuildFrame(platform::Window& window, const logic::State& logic_state,
-                ui::AppState& app_state) {
+                ui::AppState& app_state, net::DownloadManager& downloads) {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
@@ -200,52 +285,432 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
     ImGui::BeginGroup();
     switch (app_state.current_page) {
         case Page::Home: {
-            ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("content.heading"));
-            ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("content.body"));
-            ImGui::Dummy(ImVec2(0.0f, 8.0f));
-
-            static bool demo_toggle = true;
-            ImGuiMD2::Switch(ui::i18n::TrLabel("demo.switch", "demo").c_str(), &demo_toggle);
-            if (ImGuiMD2::ContainedButton(ui::i18n::TrLabel("action.primary", "primary").c_str())) {
-                // Placeholder for future features.
+            // Per-instance settings sub-view: shown in place of the launch
+            // view while an instance's settings are being edited (opened from
+            // the action pane's "settings" button, dismissed with Back).
+            if (!app_state.instance_settings_name.empty()) {
+                const ImGuiMD2::Theme& theme = ImGuiMD2::GetTheme();
+                ImGui::SetCursorScreenPos(md_min);
+                ImGui::PushStyleColor(ImGuiCol_ChildBg, theme.colors.background.Vec4());
+                ImGui::PushStyleVar(
+                    ImGuiStyleVar_WindowPadding,
+                    ImVec2(ImGuiMD2::Metrics::CardPadding(), ImGuiMD2::Metrics::CardPadding()));
+                ImGui::BeginChild("##instance_settings_view", md_size,
+                                  ImGuiChildFlags_AlwaysUseWindowPadding);
+                if (ImGuiMD2::OutlinedButton(
+                        ui::i18n::TrLabel("instance.back", "instance_back").c_str())) {
+                    app_state.instance_settings_name.clear();
+                }
+                ImGui::SameLine();
+                // Center the title against the Back button's height.
+                ImGui::AlignTextToFramePadding();
+                ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6,
+                               app_state.instance_settings_name.c_str());
+                ImGui::Dummy(ImVec2(0.0f, 12.0f));
+                ui::BuildInstanceSettings(app_state.instance_settings_name);
+                ImGui::EndChild();
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor();
+                break;
             }
 
-            ImGui::Dummy(ImVec2(0.0f, 8.0f));
-            char ticks[96];
-            std::snprintf(ticks, sizeof(ticks), ui::i18n::Tr("status.ticks"),
-                          static_cast<unsigned long long>(logic_state.ticks), logic_state.uptime_seconds);
-            ImGuiMD2::Text(ImGuiMD2::TextStyle::Caption, ticks);
+            // Two-pane launch home: a wide instance list on the left (scanned
+            // from the selected game directory's versions/), and a narrower
+            // action pane on the right with the Start button pinned to its
+            // bottom. Not MasterDetail() -- that's a fixed narrow-rail layout;
+            // this is the inverse (wide list + slim action column).
+            const std::string game_dir = ui::SelectedGameDir();
+            const std::vector<net::InstalledInstance> instances = net::ScanInstances(game_dir);
+
+            if (instances.empty()) {
+                app_state.home_selected = 0;
+            } else {
+                app_state.home_selected =
+                    std::clamp(app_state.home_selected, 0, static_cast<int>(instances.size()) - 1);
+            }
+            const net::InstalledInstance* selected_instance =
+                instances.empty() ? nullptr
+                                   : &instances[static_cast<std::size_t>(app_state.home_selected)];
+
+            constexpr float kListFraction = 0.62f;
+            const float left_w = (md_size.x - kCardGap) * kListFraction;
+            const float right_w = (md_size.x - kCardGap) - left_w;
+
+            // Left: instance list card.
+            ImGui::SetCursorScreenPos(md_min);
+            ImGuiMD2::BeginCard("##home_instances", ImVec2(left_w, md_size.y), 2);
+            char inst_header[96];
+            std::snprintf(inst_header, sizeof(inst_header), ui::i18n::Tr("home.instances_header"),
+                          static_cast<int>(instances.size()));
+            ImGuiMD2::Text(ImGuiMD2::TextStyle::Subtitle1, inst_header);
+            ImGui::BeginChild("##home_instance_list", ImVec2(0.0f, 0.0f));
+            if (instances.empty()) {
+                ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("home.empty"));
+            } else {
+                for (std::size_t i = 0; i < instances.size(); ++i) {
+                    const bool is_selected = (static_cast<int>(i) == app_state.home_selected);
+                    if (ImGuiMD2::ListItem(instances[i].name.c_str(),
+                                           instances[i].version_id.c_str(), nullptr, nullptr,
+                                           is_selected)) {
+                        app_state.home_selected = static_cast<int>(i);
+                    }
+                }
+            }
+            ImGui::EndChild();
+            ImGuiMD2::EndCard();
+
+            ImGui::SameLine(0.0f, kCardGap);
+
+            // Right: action pane. Selected-instance info at the top, Start
+            // button pinned to the bottom.
+            ImGuiMD2::BeginCard("##home_actions", ImVec2(right_w, md_size.y), 2);
+            if (selected_instance != nullptr) {
+                ImGuiMD2::Text(ImGuiMD2::TextStyle::Subtitle1, selected_instance->name.c_str());
+                ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, selected_instance->version_id.c_str());
+            }
+            // Bottom-pinned action cluster: "Instance Settings" (when an
+            // instance is selected) stacked directly above "Start Game".
+            const float action_button_h = ImGuiMD2::Metrics::TouchTarget();
+            const float action_gap = ImGui::GetStyle().ItemSpacing.y;
+            const float cluster_h = selected_instance != nullptr
+                                        ? (2.0f * action_button_h + action_gap)
+                                        : action_button_h;
+            const float pad_to_bottom = ImGui::GetContentRegionAvail().y - cluster_h;
+            if (pad_to_bottom > 0.0f) {
+                ImGui::Dummy(ImVec2(0.0f, pad_to_bottom));
+            }
+            if (selected_instance != nullptr &&
+                ImGuiMD2::OutlinedButton(
+                    ui::i18n::TrLabel("instance.settings", "instance_settings").c_str(),
+                    ImVec2(ImGui::GetContentRegionAvail().x, 0.0f))) {
+                app_state.instance_settings_name = selected_instance->name;
+            }
+            // Enabled whenever an instance is selected; missing Java/account is
+            // reported via the snackbar on click (rather than a silent disable)
+            // so the reason is visible.
+            ImGui::BeginDisabled(selected_instance == nullptr);
+            if (ImGuiMD2::ContainedButton(ui::i18n::TrLabel("home.start", "home_start").c_str(),
+                                          ImVec2(ImGui::GetContentRegionAvail().x, 0.0f)) &&
+                selected_instance != nullptr) {
+                config::Config& cfg = config::Config::Instance();
+                const std::string java = ui::SelectedJavaPath();
+                const std::string player = ui::SelectedAccountName();
+                if (java.empty()) {
+                    std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg), "%s",
+                                  ui::i18n::Tr("home.launch.no_java"));
+                    app_state.snackbar_open = true;
+                } else if (player.empty()) {
+                    std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg), "%s",
+                                  ui::i18n::Tr("home.launch.no_account"));
+                    app_state.snackbar_open = true;
+                } else {
+                    net::LaunchParams lp;
+                    lp.game_dir = game_dir;
+                    lp.instance_name = selected_instance->name;
+                    lp.java_exe = java;
+                    lp.memory_mb =
+                        static_cast<int>(ui::InstanceMemoryMb(selected_instance->name));
+                    lp.jvm_args = ui::InstanceJvmArgs(selected_instance->name);
+                    lp.player_name = player;
+                    lp.player_uuid = ui::SelectedAccountUuid();
+                    lp.isolate_instance = cfg.GetBool("game.isolation", true);
+
+                    const net::LaunchCommand lc = net::PrepareLaunch(lp);
+                    if (!lc.error.empty()) {
+                        std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg),
+                                      ui::i18n::Tr("home.launch.failed"), lc.error.c_str());
+                    } else if (platform::LaunchProcess(lc.exe, lc.args, lc.cwd)) {
+                        std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg),
+                                      ui::i18n::Tr("home.launch.started"), lp.instance_name.c_str());
+                    } else {
+                        std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg),
+                                      ui::i18n::Tr("home.launch.failed"), "spawn failed");
+                    }
+                    app_state.snackbar_open = true;
+                }
+            }
+            ImGui::EndDisabled();
+            ImGuiMD2::EndCard();
             break;
         }
         case Page::Download: {
+            // First time this page is shown, kick off one manifest refresh so
+            // the version list is populated without the user having to click
+            // Refresh. RefreshManifest is a no-op while one is already in
+            // flight, so this is safe even if it races the button.
+            if (!app_state.download_auto_refreshed) {
+                downloads.RefreshManifest(
+                    MirrorModeFromConfig(config::Config::Instance()));
+                app_state.download_auto_refreshed = true;
+            }
+
             static const char* const kKeys[] = {"download.games", "download.mods"};
             int current = static_cast<int>(app_state.download_section);
             MasterDetail(kKeys, 2, current, md_min, md_size, [&]() {
                 switch (app_state.download_section) {
-                    case DownloadSection::Games:
+                    case DownloadSection::Games: {
                         ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("download.games"));
+
+                        config::Config& cfg = config::Config::Instance();
+
+                        // Refresh (left) and the version-type filters (right)
+                        // share one row. The checkboxes are TouchTarget (48dp)
+                        // tall, the button is shorter. To keep the four boxes
+                        // perfectly aligned with each other AND vertically
+                        // center the button, the button and the checkbox group
+                        // are drawn as two independent lines (both anchored to
+                        // row_top_y) rather than chained with SameLine -- a
+                        // SameLine chain would leak the button's centering
+                        // offset into the first checkbox and stagger the row.
+                        const float row_top_y = ImGui::GetCursorPosY();
+                        const float row_left_x = ImGui::GetCursorPosX();
+                        const float row_h = ImGuiMD2::Metrics::TouchTarget();
+                        const float btn_h = ImGuiMD2::Metrics::ButtonMinHeight();
+                        const float spacing_x = ImGui::GetStyle().ItemSpacing.x;
+
+                        // Predict the checkbox group's width up front (each box
+                        // is TouchTarget + its label measured in the Body1 font,
+                        // matching Checkbox's own impl in components.cpp) so the
+                        // group can be right-aligned.
+                        const char* const type_labels[] = {
+                            ui::i18n::Tr("download.type.release"),
+                            ui::i18n::Tr("download.type.snapshot"),
+                            ui::i18n::Tr("download.type.old_beta"),
+                            ui::i18n::Tr("download.type.old_alpha")};
+                        bool* const type_flags[] = {
+                            &app_state.filter_release, &app_state.filter_snapshot,
+                            &app_state.filter_old_beta, &app_state.filter_old_alpha};
+
+                        ImFont* body1_font = ImGuiMD2::GetTheme().fonts.Get(ImGuiMD2::TextStyle::Body1);
+                        float group_w = 3.0f * spacing_x; // 3 gaps between the 4 boxes
+                        if (body1_font) ImGui::PushFont(body1_font);
+                        for (const char* label : type_labels) {
+                            group_w += ImGuiMD2::Metrics::TouchTarget() + ImGui::CalcTextSize(label).x;
+                        }
+                        if (body1_font) ImGui::PopFont();
+
+                        // Refresh button: on the left, vertically centered
+                        // within the taller checkbox row.
+                        ImGui::SetCursorPos(ImVec2(row_left_x, row_top_y + (row_h - btn_h) * 0.5f));
+                        if (ImGuiMD2::ContainedButton(
+                                ui::i18n::TrLabel("download.refresh", "download_refresh").c_str())) {
+                            downloads.RefreshManifest(MirrorModeFromConfig(cfg));
+                        }
+                        const float button_w = ImGui::GetItemRectSize().x;
+
+                        // Checkbox group: its own line at row_top_y so all four
+                        // stay aligned. Right-aligned to the version list's right
+                        // edge (the list child reserves a scrollbar, so its rows
+                        // end one ScrollbarSize short of the content edge -- match
+                        // that inset), clamped so it never overlaps the button.
+                        const float right_edge =
+                            ImGui::GetContentRegionMax().x - ImGui::GetStyle().ScrollbarSize;
+                        const float group_x =
+                            std::max(row_left_x + button_w + spacing_x, right_edge - group_w);
+                        ImGui::SetCursorPos(ImVec2(group_x, row_top_y));
+                        for (int i = 0; i < 4; ++i) {
+                            if (i > 0) ImGui::SameLine();
+                            ImGuiMD2::Checkbox(type_labels[i], type_flags[i]);
+                        }
+
+                        // Continue below the whole row (the checkbox line is the
+                        // taller of the two) with the normal inter-row gap.
+                        ImGui::SetCursorPos(ImVec2(row_left_x, row_top_y + row_h));
+                        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+
+                        const net::ManifestSnapshot snapshot = downloads.manifest();
+                        ImGui::BeginChild("##version_list", ImVec2(0.0f, 0.0f));
+                        switch (snapshot.status) {
+                            case net::ManifestSnapshot::Status::Idle:
+                                break;
+                            case net::ManifestSnapshot::Status::Loading:
+                                ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("download.loading"));
+                                ImGuiMD2::LinearProgressIndeterminate("##manifest_loading");
+                                break;
+                            case net::ManifestSnapshot::Status::Error:
+                                ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2,
+                                               ui::i18n::Tr("download.load_failed"));
+                                if (!snapshot.error.empty()) {
+                                    ImGuiMD2::Text(ImGuiMD2::TextStyle::Caption, snapshot.error.c_str());
+                                }
+                                break;
+                            case net::ManifestSnapshot::Status::Ready:
+                                for (const net::VersionEntry& entry : snapshot.versions) {
+                                    const bool show =
+                                        (entry.type == "release" && app_state.filter_release) ||
+                                        (entry.type == "snapshot" && app_state.filter_snapshot) ||
+                                        (entry.type == "old_beta" && app_state.filter_old_beta) ||
+                                        (entry.type == "old_alpha" && app_state.filter_old_alpha);
+                                    if (!show) continue;
+                                    if (ImGuiMD2::ListItem(entry.id.c_str(), nullptr, nullptr,
+                                                           entry.release_time.c_str())) {
+                                        app_state.dialog_version_id = entry.id;
+                                        std::snprintf(app_state.instance_name_buf,
+                                                      sizeof(app_state.instance_name_buf), "%s",
+                                                      entry.id.c_str());
+                                        // Defer the actual OpenDialog to the
+                                        // root scope below (see the flag's
+                                        // comment in app_state.h) -- calling it
+                                        // here, inside this child window, keys
+                                        // the popup to the wrong ID stack.
+                                        app_state.open_new_instance_request = true;
+                                    }
+                                }
+                                break;
+                        }
+                        ImGui::EndChild();
                         break;
+                    }
                     case DownloadSection::Mods:
                         ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("download.mods"));
+                        ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("page.wip"));
                         break;
                     case DownloadSection::Count:
                         break;
                 }
-                ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("page.wip"));
             });
             app_state.download_section = static_cast<DownloadSection>(current);
+
+            // Open the dialog here, at the root window scope (NOT inside the
+            // version-list child where the row was clicked), so OpenDialog's
+            // popup id matches the BeginDialog below -- see the flag's comment
+            // in app_state.h.
+            if (app_state.open_new_instance_request) {
+                ImGuiMD2::OpenDialog("##new_instance");
+                app_state.open_new_instance_request = false;
+            }
+
+            // Dialog scrim: instead of ImGui's full-viewport modal dim (disabled
+            // in imgui_md2's ApplyTheme), dim only the center content region so
+            // the top bar and bottom nav stay lit. A plain translucent window
+            // over the md rect: created after the page content/cards so it sits
+            // above them, and always below the modal popup (popups render atop
+            // normal windows), so the dialog itself isn't dimmed.
+            if (ImGui::IsPopupOpen("##new_instance")) {
+                const ImGuiMD2::Theme& t = ImGuiMD2::GetTheme();
+                ImGui::SetNextWindowPos(md_min);
+                ImGui::SetNextWindowSize(md_size);
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, t.colors.scrim.Vec4());
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, t.shapes.medium);
+                ImGui::Begin("##dialog_scrim", nullptr,
+                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                                 ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings |
+                                 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoInputs |
+                                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+                ImGui::End();
+                ImGui::PopStyleVar();
+                ImGui::PopStyleColor();
+            }
+
+            // New-instance dialog: BeginDialog must be called every frame
+            // (it's a thin wrapper over ImGui::BeginPopupModal, which only
+            // actually opens once OpenDialog()'s matching ImGui::OpenPopup
+            // was called) -- cheap no-op while closed.
+            if (ImGuiMD2::BeginDialog("##new_instance")) {
+                ImGuiMD2::TextH6(ui::i18n::Tr("download.dialog.title"));
+
+                ImGuiMD2::TextFieldOptions name_options;
+                name_options.variant = ImGuiMD2::TextFieldVariant::Outlined;
+                ImGuiMD2::TextField(ui::i18n::Tr("download.dialog.name"), app_state.instance_name_buf,
+                                    sizeof(app_state.instance_name_buf), name_options);
+
+                const net::ManifestSnapshot snapshot = downloads.manifest();
+                const net::VersionEntry* selected_entry = nullptr;
+                for (const net::VersionEntry& entry : snapshot.versions) {
+                    if (entry.id == app_state.dialog_version_id) {
+                        selected_entry = &entry;
+                        break;
+                    }
+                }
+                if (selected_entry != nullptr) {
+                    char info[256];
+                    std::snprintf(info, sizeof(info), "%s: %s   %s: %s   %s: %s",
+                                  ui::i18n::Tr("download.dialog.info.id"), selected_entry->id.c_str(),
+                                  ui::i18n::Tr("download.dialog.info.type"), selected_entry->type.c_str(),
+                                  ui::i18n::Tr("download.dialog.info.time"),
+                                  selected_entry->release_time.c_str());
+                    ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, info);
+                }
+
+                if (ImGuiMD2::ContainedButton(
+                        ui::i18n::TrLabel("action.confirm", "new_instance_confirm").c_str())) {
+                    if (selected_entry != nullptr && app_state.instance_name_buf[0] != '\0') {
+                        config::Config& cfg = config::Config::Instance();
+                        net::InstallParams params;
+                        params.game_dir = ui::SelectedGameDir();
+                        params.instance_name = app_state.instance_name_buf;
+                        params.mirror = MirrorModeFromConfig(cfg);
+                        params.concurrency = static_cast<int>(cfg.GetInt("download.concurrency", 8));
+                        params.threads_per_file = static_cast<int>(cfg.GetInt("download.threads", 4));
+                        downloads.EnqueueInstall(*selected_entry, params);
+
+                        std::snprintf(app_state.snackbar_msg, sizeof(app_state.snackbar_msg),
+                                      ui::i18n::Tr("download.task_added"), params.instance_name.c_str());
+                        app_state.snackbar_open = true;
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGuiMD2::TextButton(
+                        ui::i18n::TrLabel("action.cancel", "new_instance_cancel").c_str())) {
+                    ImGui::CloseCurrentPopup();
+                }
+
+                ImGuiMD2::EndDialog();
+            }
             break;
         }
         case Page::Profiles: {
             ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("nav.profiles"));
-            ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("page.wip"));
+            ImGui::Dummy(ImVec2(0.0f, 8.0f));
+            ui::BuildAccountSettings(app_state);
+
+            // Open the new-offline-account dialog here, at the root window
+            // scope (the "add" button that requests it lives inside the
+            // account-list card's child window) -- same OpenDialog scoping
+            // reasoning as the download page's new-instance dialog.
+            if (app_state.open_new_account_request) {
+                app_state.account_name_buf[0] = '\0';
+                ImGuiMD2::OpenDialog("##new_account");
+                app_state.open_new_account_request = false;
+            }
+            if (ImGuiMD2::BeginDialog("##new_account")) {
+                ImGuiMD2::TextH6(ui::i18n::Tr("profiles.dialog.title"));
+
+                ImGuiMD2::TextFieldOptions name_options;
+                name_options.variant = ImGuiMD2::TextFieldVariant::Outlined;
+                ImGuiMD2::TextField(ui::i18n::Tr("profiles.dialog.name"), app_state.account_name_buf,
+                                    sizeof(app_state.account_name_buf), name_options);
+
+                if (ImGuiMD2::ContainedButton(
+                        ui::i18n::TrLabel("action.confirm", "new_account_confirm").c_str())) {
+                    if (app_state.account_name_buf[0] != '\0') {
+                        ui::CreateOfflineAccount(app_state.account_name_buf);
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGuiMD2::TextButton(
+                        ui::i18n::TrLabel("action.cancel", "new_account_cancel").c_str())) {
+                    ImGui::CloseCurrentPopup();
+                }
+
+                ImGuiMD2::EndDialog();
+            }
             break;
         }
         case Page::Settings: {
             static const char* const kKeys[] = {"settings.appearance", "settings.game",
-                                                "settings.java", "settings.about"};
+                                                "settings.java", "settings.download",
+                                                "settings.about"};
             int current = static_cast<int>(app_state.settings_section);
-            MasterDetail(kKeys, 4, current, md_min, md_size, [&]() {
+            // Java/Game/Download settings each draw their own separate cards
+            // -- see MasterDetail()'s detail_card doc comment for why that
+            // needs the plain (uncarded) detail region.
+            const bool detail_card = app_state.settings_section != SettingsSection::Java &&
+                                     app_state.settings_section != SettingsSection::Game &&
+                                     app_state.settings_section != SettingsSection::Download;
+            MasterDetail(kKeys, 5, current, md_min, md_size, [&]() {
                 switch (app_state.settings_section) {
                     case SettingsSection::Appearance: {
                         ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("settings.appearance"));
@@ -314,12 +779,10 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
                         break;
                     }
                     case SettingsSection::Game:
-                        ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("settings.game"));
-                        ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("page.wip"));
+                        ui::BuildGameSettings();
                         break;
                     case SettingsSection::Java:
-                        ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("settings.java"));
-                        ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("page.wip"));
+                        ui::BuildJavaSettings();
                         break;
                     case SettingsSection::About:
                         ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("settings.about"));
@@ -327,16 +790,93 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
                         ImGuiMD2::Text(ImGuiMD2::TextStyle::Body1,
                                        "https://github.com/antinomie1/Pluma");
                         break;
+                    case SettingsSection::Download:
+                        ui::BuildDownloadSettings();
+                        break;
                     case SettingsSection::Count:
                         break;
                 }
-            });
+            }, detail_card);
             app_state.settings_section = static_cast<SettingsSection>(current);
             break;
         }
         case Page::Tasks: {
             ImGuiMD2::Text(ImGuiMD2::TextStyle::Headline6, ui::i18n::Tr("nav.tasks"));
-            ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("page.wip"));
+
+            const std::vector<net::TaskInfo> task_list = downloads.tasks();
+            if (task_list.empty()) {
+                ImGuiMD2::Text(ImGuiMD2::TextStyle::Body2, ui::i18n::Tr("tasks.empty"));
+                break;
+            }
+
+            // Fixed-width right-hand column (progress bar, speed text, two
+            // icon buttons); the name/status text on the left wraps to
+            // whatever's left of the row.
+            constexpr float kRightColumnWidth = 220.0f;
+            constexpr float kProgressWidth = 140.0f;
+
+            for (const net::TaskInfo& task : task_list) {
+                ImGui::PushID(static_cast<int>(task.id));
+
+                const float row_width = ImGui::GetContentRegionAvail().x;
+                const float left_width =
+                    std::max(80.0f, row_width - kRightColumnWidth - ImGui::GetStyle().ItemSpacing.x);
+                const float row_top_y = ImGui::GetCursorPosY();
+
+                ImGui::BeginGroup();
+                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + left_width);
+                ImGuiMD2::Text(ImGuiMD2::TextStyle::Subtitle1, task.name.c_str());
+                char status_line[160];
+                std::snprintf(status_line, sizeof(status_line), "%s - %s", PhaseLabel(task.phase),
+                              StatusLabel(task.status));
+                ImGuiMD2::Text(ImGuiMD2::TextStyle::Caption, status_line);
+                ImGui::PopTextWrapPos();
+                ImGui::EndGroup();
+
+                ImGui::SameLine(left_width + ImGui::GetStyle().ItemSpacing.x);
+                ImGui::SetCursorPosY(row_top_y);
+                ImGui::BeginGroup();
+                const float fraction = task.bytes_total > 0
+                                          ? static_cast<float>(task.bytes_done) /
+                                                static_cast<float>(task.bytes_total)
+                                          : 0.0f;
+                ImGuiMD2::LinearProgress(fraction, ImVec2(kProgressWidth, 4.0f));
+                char speed_text[64];
+                std::snprintf(speed_text, sizeof(speed_text), ui::i18n::Tr("tasks.speed"),
+                              task.speed_bps / (1024.0 * 1024.0));
+                ImGuiMD2::Text(ImGuiMD2::TextStyle::Caption, speed_text);
+                ImGui::EndGroup();
+
+                ImGui::SameLine();
+                ImGui::SetCursorPosY(row_top_y);
+                const bool is_paused = (task.status == net::TaskInfo::Status::Paused);
+                const bool pause_enabled = task.status == net::TaskInfo::Status::Running ||
+                                          task.status == net::TaskInfo::Status::Paused;
+                if (ImGuiMD2::IconButton("##pause_resume", is_paused ? kPlayIcon : kPauseIcon, false,
+                                         pause_enabled)) {
+                    if (is_paused) {
+                        downloads.Resume(task.id);
+                    } else {
+                        downloads.Pause(task.id);
+                    }
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGuiMD2::Tooltip(ui::i18n::Tr(is_paused ? "action.resume" : "action.pause"));
+                }
+                ImGui::SameLine();
+                // Cancel deletes versions/<name>/ -- disabled once a task is
+                // Done so a finished install can't be destroyed by accident.
+                const bool cancel_enabled = task.status != net::TaskInfo::Status::Done;
+                if (ImGuiMD2::IconButton("##cancel", ImGuiMD2::Icons::Close, false, cancel_enabled)) {
+                    downloads.Cancel(task.id);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGuiMD2::Tooltip(ui::i18n::Tr("action.cancel"));
+                }
+
+                ImGui::PopID();
+                ImGuiMD2::Divider();
+            }
             break;
         }
         case Page::Count:
@@ -407,6 +947,16 @@ void BuildFrame(platform::Window& window, const logic::State& logic_state,
     if (NavButton(Page::Tasks, "nav.tasks", "nav_tasks")) {
         app_state.current_page = Page::Tasks;
     }
+
+    // Root-level snackbar (confirms a download task was enqueued): rendered
+    // once here regardless of the current page, since the dialog that
+    // triggers it (the Download page's new-instance dialog) closes itself
+    // immediately on confirm. Anchored to the center content region (md rect,
+    // computed above) so it sits inside the content area, above the bottom nav
+    // bar, rather than overlapping it at the viewport's edge.
+    const ImVec2 md_max(md_min.x + md_size.x, md_min.y + md_size.y);
+    ImGuiMD2::Snackbar("##task_snackbar", app_state.snackbar_msg, &app_state.snackbar_open,
+                       nullptr, 4.0f, &md_min, &md_max);
 
     ImGui::End();
 }

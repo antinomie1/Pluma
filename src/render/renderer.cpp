@@ -6,7 +6,9 @@
 #include "logic/engine.h"
 #include "platform/window.h"
 #include "ui/frame.h"
+#include "ui/game_settings.h"
 #include "ui/i18n.h"
+#include "ui/java_settings.h"
 #include "ui/theme.h"
 
 #include <imgui.h>
@@ -124,6 +126,9 @@ void Renderer::start() {
     if (running_.exchange(true)) {
         return;
     }
+    // Lets platform drive a synchronous repaint per WM_SIZE tick during a live
+    // resize without platform depending on render (see window.h).
+    window_.setResizeRenderCallback([this] { renderFrame(); });
     thread_ = std::thread(&Renderer::run, this);
 }
 
@@ -131,7 +136,8 @@ void Renderer::stop() {
     if (!running_.exchange(false)) {
         return;
     }
-    window_.renderGate().stop(); // release the thread if it is parked (minimised)
+    window_.renderGate().stop();      // release the thread if it is parked (minimised)
+    window_.resizePauseGate().stop(); // release the thread if it is parked (mid-resize)
     if (thread_.joinable()) {
         thread_.join();
     }
@@ -159,6 +165,16 @@ void Renderer::run() {
     config::Config::Instance().Load("config.json");
     const std::string configured_lang = config::Config::Instance().GetString("language", "");
     ui::i18n::Initialize(configured_lang.empty() ? nullptr : configured_lang.c_str());
+
+    // First-launch (or nothing-configured-yet) Java auto-discovery, scanning
+    // PATH/JAVA_HOME. Render-thread-exclusive, same as the config/theme/i18n
+    // reads directly above -- see ui::EnsureJavaAutoDiscovered()'s comment.
+    ui::EnsureJavaAutoDiscovered();
+    // Same idea for the game (".minecraft") directory list -- seeds it with
+    // <cwd>/.minecraft on first launch. See ui::EnsureGameDirSeeded()'s
+    // comment.
+    ui::EnsureGameDirSeeded();
+    downloads_.start();
 
     const bool configured_dark = config::Config::Instance().GetBool("theme.dark", false);
     const int configured_accent = static_cast<int>(
@@ -205,8 +221,7 @@ void Renderer::run() {
 
     ImGui_ImplOpenGL3_Init("#version 150");
 
-    std::vector<core::InputEvent> events;
-    auto previous = clock::now();
+    previous_frame_time_ = clock::now();
 
     while (running_.load(std::memory_order_relaxed)) {
         core::WindowMetrics metrics = window_.metricsSnapshot();
@@ -216,42 +231,28 @@ void Renderer::run() {
             if (!window_.renderGate().wait()) {
                 break;
             }
-            previous = clock::now();
+            previous_frame_time_ = clock::now();
             continue;
         }
 
-        const auto frame_start = clock::now();
-
-        window_.events().drain(events);
-        feed_input(io, events);
-
-        io.DisplaySize = ImVec2(std::floor(static_cast<float>(metrics.width)),
-                                std::floor(static_cast<float>(metrics.height)));
-        if (metrics.width > 0 && metrics.height > 0) {
-            io.DisplayFramebufferScale =
-                ImVec2(static_cast<float>(metrics.fb_width) / static_cast<float>(metrics.width),
-                       static_cast<float>(metrics.fb_height) / static_cast<float>(metrics.height));
+        // Hand the GL context to the main thread for the duration of a live
+        // border-drag: release it, signal beginInteractiveResize() that it's
+        // safe to acquire, then park until endInteractiveResize() reopens the
+        // gate. The main thread drives its own synchronous repaint per
+        // WM_SIZE tick via the renderResizeTick() callback in the meantime
+        // (see win32_chrome.cpp).
+        if (window_.resizePauseRequested()) {
+            window_.detachContext();
+            window_.resizeContextReadyGate().open();
+            if (!window_.resizePauseGate().wait()) {
+                break;
+            }
+            window_.makeContextCurrent();
+            previous_frame_time_ = clock::now();
+            continue;
         }
-        float dt = std::chrono::duration<float>(frame_start - previous).count();
-        previous = frame_start;
-        io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
 
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui::NewFrame();
-        ImGuiMD2::NewFrame();
-
-        const logic::State logic_state = engine_.snapshot();
-        ui::BuildFrame(window_, logic_state, app_state_);
-
-        ImGui::Render();
-
-        glViewport(0, 0, metrics.fb_width, metrics.fb_height);
-        const ImGuiMD2::Color clear = ImGuiMD2::clear_color();
-        glClearColor(clear.r, clear.g, clear.b, clear.a);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-
-        window_.swapBuffers();
+        const auto frame_start = renderFrame();
 
         // FPS cap on top of VSync: sleep out any remaining time in the frame
         // budget. With VSync this is usually a no-op; it enforces the ceiling
@@ -263,10 +264,53 @@ void Renderer::run() {
         }
     }
 
+    downloads_.stop();
+
     ImGui_ImplOpenGL3_Shutdown();
     ImGuiMD2::DestroyContext();
     ImGui::DestroyContext();
     window_.detachContext();
+}
+
+std::chrono::steady_clock::time_point Renderer::renderFrame() {
+    using clock = std::chrono::steady_clock;
+
+    core::WindowMetrics metrics = window_.metricsSnapshot();
+    const auto frame_start = clock::now();
+
+    window_.events().drain(pending_events_);
+    ImGuiIO& io = ImGui::GetIO();
+    feed_input(io, pending_events_);
+
+    io.DisplaySize = ImVec2(std::floor(static_cast<float>(metrics.width)),
+                            std::floor(static_cast<float>(metrics.height)));
+    if (metrics.width > 0 && metrics.height > 0) {
+        io.DisplayFramebufferScale =
+            ImVec2(static_cast<float>(metrics.fb_width) / static_cast<float>(metrics.width),
+                   static_cast<float>(metrics.fb_height) / static_cast<float>(metrics.height));
+    }
+    float dt = std::chrono::duration<float>(frame_start - previous_frame_time_).count();
+    previous_frame_time_ = frame_start;
+    io.DeltaTime = dt > 0.0f ? dt : 1.0f / 60.0f;
+
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui::NewFrame();
+    ImGuiMD2::NewFrame();
+
+    const logic::State logic_state = engine_.snapshot();
+    ui::BuildFrame(window_, logic_state, app_state_, downloads_);
+
+    ImGui::Render();
+
+    glViewport(0, 0, metrics.fb_width, metrics.fb_height);
+    const ImGuiMD2::Color clear = ImGuiMD2::clear_color();
+    glClearColor(clear.r, clear.g, clear.b, clear.a);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    window_.swapBuffers();
+
+    return frame_start;
 }
 
 } // namespace render
